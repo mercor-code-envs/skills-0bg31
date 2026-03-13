@@ -9,19 +9,22 @@ jobs:
   poll:
     runs-on: ubuntu-latest
     steps:
-      - name: Find claimed tasks, fork repo, add collaborator, update Airtable
+      - name: Setup claimed tasks — fork, branch, push task files, add collaborator
         env:
           AT_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
           GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
         run: |
           python3 << 'EOF'
-          import json, os, time, urllib.request, urllib.parse, subprocess
+          import base64, io, json, os, time, urllib.request, urllib.parse, zipfile
+          from urllib.parse import urlparse
 
           AT_TOKEN = os.environ["AT_TOKEN"]
           GH_TOKEN = os.environ["GH_TOKEN"]
           BASE = "appVMECzrlP3j1BFm"
-          TABLE = "tblkLmyEvZfWY5J31"
+          TASK_TABLE = "tblkLmyEvZfWY5J31"
           EXPERT_TABLE = "tblNvesyHUH1E1sJZ"
+
+          # ── Airtable helpers ─────────────────────────────────────────────────
 
           def at_get(url):
               req = urllib.request.Request(url, headers={"Authorization": f"Bearer {AT_TOKEN}"})
@@ -39,24 +42,48 @@ jobs:
               with urllib.request.urlopen(req) as r:
                   return json.loads(r.read())
 
-          def gh(args):
-              result = subprocess.run(
-                  ["gh"] + args,
-                  env={**os.environ, "GH_TOKEN": GH_TOKEN},
-                  capture_output=True, text=True
-              )
-              return result.returncode, result.stdout, result.stderr
+          # ── GitHub API helper ────────────────────────────────────────────────
 
-          # Fetch claimed tasks not yet set up
+          def gh_api(method, path, body=None):
+              url = f"https://api.github.com{path}"
+              data = json.dumps(body).encode() if body else None
+              req = urllib.request.Request(
+                  url, data=data,
+                  headers={
+                      "Authorization": f"Bearer {GH_TOKEN}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "Content-Type": "application/json",
+                  },
+                  method=method
+              )
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return json.loads(r.read())
+              except urllib.error.HTTPError as e:
+                  body_text = e.read().decode()
+                  raise RuntimeError(f"GitHub {method} {path} → {e.code}: {body_text[:200]}")
+
+          # ── Fetch claimed tasks not yet set up ───────────────────────────────
+
           formula = urllib.parse.quote("AND({task_status}='Claimed',{time_in_progress}='')")
-          data = at_get(f"https://api.airtable.com/v0/{BASE}/{TABLE}?filterByFormula={formula}&fields[]=repo&fields[]=expert__id&fields[]=expert")
+          fields = "&".join([
+              "fields[]=repo", "fields[]=expert__id", "fields[]=expert",
+              "fields[]=branch_name", "fields[]=s3_presigned_url",
+          ])
+          data = at_get(
+              f"https://api.airtable.com/v0/{BASE}/{TASK_TABLE}"
+              f"?filterByFormula={formula}&{fields}"
+          )
           records = data.get("records", [])
-          print(f"Found {len(records)} claimed tasks awaiting setup")
+          print(f"Found {len(records)} claimed task(s) awaiting setup")
 
           for r in records:
               f = r["fields"]
               record_id = r["id"]
+              print(f"\n── Record {record_id} ──")
 
+              # Resolve fork repo name
               repo_val = f.get("repo", "")
               fork_repo = (repo_val[0] if isinstance(repo_val, list) else str(repo_val)).strip()
 
@@ -65,7 +92,14 @@ jobs:
               expert_links = f.get("expert", [])
               expert_record_id = expert_links[0] if expert_links else ""
 
-              # Derive fork_repo from expert_id if not yet set
+              branch_name = f.get("branch_name", f"skills-{record_id.lower()}")
+              s3_url = f.get("s3_presigned_url", "")
+
+              # Derive task_slug from S3 URL
+              task_slug = ""
+              if s3_url:
+                  task_slug = urlparse(s3_url).path.split("/")[-1].replace(".zip", "")
+
               if not fork_repo and expert_id:
                   fork_repo = f"skills-{expert_id}"
                   if expert_record_id:
@@ -76,10 +110,125 @@ jobs:
                           print(f"  WARN: Could not set Expert.repo: {e}")
 
               if not fork_repo:
-                  print(f"SKIP {record_id}: cannot resolve fork_repo")
+                  print(f"  SKIP: cannot resolve fork_repo")
                   continue
 
-              # Fetch expert GitHub username
+              print(f"  fork={fork_repo}  branch={branch_name}  task={task_slug}")
+
+              # ── Step 1: Ensure fork exists ──────────────────────────────────
+              try:
+                  gh_api("GET", f"/repos/mercor-code-envs/{fork_repo}")
+                  print(f"  Fork already exists ✓")
+              except RuntimeError:
+                  print(f"  Forking skills-template → {fork_repo}...")
+                  try:
+                      gh_api("POST", "/repos/mercor-code-envs/skills-template/forks", {
+                          "organization": "mercor-code-envs",
+                          "name": fork_repo,
+                          "default_branch_only": False,
+                      })
+                      # Poll until fork is ready
+                      for _ in range(20):
+                          time.sleep(3)
+                          try:
+                              gh_api("GET", f"/repos/mercor-code-envs/{fork_repo}")
+                              break
+                          except RuntimeError:
+                              pass
+                      print(f"  Fork ready ✓")
+                  except RuntimeError as e:
+                      print(f"  ERROR creating fork: {e}")
+                      continue
+
+              # ── Step 2: Ensure task branch exists ──────────────────────────
+              try:
+                  repo_info = gh_api("GET", f"/repos/mercor-code-envs/{fork_repo}")
+                  default_branch = repo_info.get("default_branch", "main")
+                  ref_data = gh_api("GET", f"/repos/mercor-code-envs/{fork_repo}/git/refs/heads/{default_branch}")
+                  sha = (ref_data[0] if isinstance(ref_data, list) else ref_data)["object"]["sha"]
+
+                  try:
+                      gh_api("POST", f"/repos/mercor-code-envs/{fork_repo}/git/refs", {
+                          "ref": f"refs/heads/{branch_name}",
+                          "sha": sha,
+                      })
+                      print(f"  Branch {branch_name} created ✓")
+                  except RuntimeError as e:
+                      if "already exists" in str(e) or "422" in str(e):
+                          print(f"  Branch {branch_name} already exists ✓")
+                      else:
+                          raise
+              except RuntimeError as e:
+                  print(f"  ERROR creating branch: {e}")
+                  continue
+
+              # ── Step 3: Push task files from S3 to branch ──────────────────
+              if s3_url and task_slug:
+                  try:
+                      # Check if task already pushed (tasks/{task_slug}/ exists)
+                      try:
+                          gh_api("GET", f"/repos/mercor-code-envs/{fork_repo}/contents/tasks/{task_slug}?ref={branch_name}")
+                          print(f"  Task files already pushed ✓")
+                      except RuntimeError:
+                          print(f"  Downloading task zip from S3...")
+                          req = urllib.request.Request(s3_url)
+                          with urllib.request.urlopen(req, timeout=120) as resp:
+                              zip_bytes = resp.read()
+
+                          # Extract files from zip (strip top-level dir)
+                          files = {}
+                          with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                              for info in zf.infolist():
+                                  if info.is_dir():
+                                      continue
+                                  parts = info.filename.split("/", 1)
+                                  rel = parts[1] if len(parts) == 2 else info.filename
+                                  if rel:
+                                      files[rel] = zf.read(info.filename)
+
+                          print(f"  Pushing {len(files)} files to tasks/{task_slug}/...")
+
+                          # Get branch HEAD commit + tree
+                          ref_data = gh_api("GET", f"/repos/mercor-code-envs/{fork_repo}/git/refs/heads/{branch_name}")
+                          commit_sha = (ref_data[0] if isinstance(ref_data, list) else ref_data)["object"]["sha"]
+                          commit_info = gh_api("GET", f"/repos/mercor-code-envs/{fork_repo}/git/commits/{commit_sha}")
+                          base_tree_sha = commit_info["tree"]["sha"]
+
+                          # Create blobs
+                          tree_items = []
+                          for rel_path, content in files.items():
+                              blob = gh_api("POST", f"/repos/mercor-code-envs/{fork_repo}/git/blobs", {
+                                  "content": base64.b64encode(content).decode(),
+                                  "encoding": "base64",
+                              })
+                              mode = "100755" if rel_path.endswith(".sh") else "100644"
+                              tree_items.append({
+                                  "path": f"tasks/{task_slug}/{rel_path}",
+                                  "mode": mode,
+                                  "type": "blob",
+                                  "sha": blob["sha"],
+                              })
+
+                          # Create tree → commit → update ref
+                          new_tree = gh_api("POST", f"/repos/mercor-code-envs/{fork_repo}/git/trees", {
+                              "base_tree": base_tree_sha,
+                              "tree": tree_items,
+                          })
+                          new_commit = gh_api("POST", f"/repos/mercor-code-envs/{fork_repo}/git/commits", {
+                              "message": f"Add task: {task_slug}",
+                              "tree": new_tree["sha"],
+                              "parents": [commit_sha],
+                          })
+                          gh_api("PATCH", f"/repos/mercor-code-envs/{fork_repo}/git/refs/heads/{branch_name}", {
+                              "sha": new_commit["sha"],
+                          })
+                          print(f"  Task files pushed ✓")
+                  except Exception as e:
+                      print(f"  WARN: Could not push task files: {e}")
+              else:
+                  print(f"  WARN: No s3_presigned_url — skipping task file push")
+
+              # ── Step 4: Add expert as collaborator ──────────────────────────
               expert_github = ""
               if expert_record_id:
                   try:
@@ -88,41 +237,22 @@ jobs:
                   except Exception as e:
                       print(f"  WARN: Could not fetch github_id: {e}")
 
-              print(f"Setting up: fork=mercor-code-envs/{fork_repo} expert={expert_github}")
-
-              # 1. Fork skills-template (idempotent)
-              rc, out, err = gh(["api", "repos/mercor-code-envs/" + fork_repo, "--silent"])
-              if rc == 0:
-                  print(f"  Fork already exists")
-              else:
-                  print(f"  Forking skills-template -> {fork_repo}...")
-                  rc, out, err = gh(["api", "repos/mercor-code-envs/skills-template/forks",
-                                      "--method", "POST",
-                                      "--field", "organization=mercor-code-envs",
-                                      "--field", f"name={fork_repo}"])
-                  if rc != 0:
-                      print(f"  ERROR forking: {err.strip()}")
-                      continue
-                  print(f"  Fork created, waiting...")
-                  time.sleep(10)
-
-              # 2. Add expert as collaborator
               if expert_github:
-                  rc, out, err = gh(["api", f"repos/mercor-code-envs/{fork_repo}/collaborators/{expert_github}",
-                                      "--method", "PUT", "--field", "permission=write"])
-                  if rc == 0:
-                      print(f"  Added {expert_github} as collaborator")
-                  else:
-                      print(f"  WARN: Could not add collaborator: {err.strip()[:100]}")
+                  try:
+                      gh_api("PUT", f"/repos/mercor-code-envs/{fork_repo}/collaborators/{expert_github}",
+                             {"permission": "write"})
+                      print(f"  Added {expert_github} as collaborator ✓")
+                  except RuntimeError as e:
+                      print(f"  WARN: Could not add collaborator: {e}")
 
-              # 3. Update Airtable to In Progress
+              # ── Step 5: Update Airtable → In Progress ───────────────────────
               try:
                   from datetime import datetime, timezone
                   now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                  at_patch(TABLE, record_id, {"task_status": "In Progress", "time_in_progress": now})
-                  print(f"  Airtable -> In Progress")
+                  at_patch(TASK_TABLE, record_id, {"task_status": "In Progress", "time_in_progress": now})
+                  print(f"  Airtable → In Progress ✓")
               except Exception as e:
                   print(f"  WARN: Airtable update failed: {e}")
 
-          print("Done.")
+          print("\nDone.")
           EOF
