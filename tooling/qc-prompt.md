@@ -226,7 +226,7 @@ In addition to passing all 9 Golden Skill criteria above, a distractor skill mus
 
 ## Edge Cases
 
-- **Multiline YAML values:** The YAML parser reads single-line `key: value` pairs only. Multi-line YAML blocks (e.g., `description: |`) will not be parsed correctly — flag and ask the author to flatten to a single line.
+- **Multiline YAML values:** Both single-line (`key: value`) and block scalar (`key: >` or `key: |`) formats are supported by the validators. Authors may use either format in their SKILL.md frontmatter.
 - **Empty `scripts/` directory:** Acceptable only if all executable logic is documented as external commands in SKILL.md. Flag if no implementation is documented anywhere.
 - **Digits in name:** Valid (e.g., `pdf-v2`), but digits alone must not be the only differentiator between otherwise identical skill names.
 - **`references/` vs `scripts/reference/`:** Reference material must go in `references/` at the skill root — not inside `scripts/`. Flag any reference files found under `scripts/`.
