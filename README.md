@@ -1,197 +1,238 @@
-# Skills — Expert Task Creation Guide
+# GDM Skills — Expert Task Guide
 
-Each task in this dataset is a software engineering problem that frontier models **fail without a custom skill** but can solve with it. Your job is to create one such task.
-
----
-
-## Quick Start
-
-1. Fork this repo
-2. Create a new directory under `tasks/` named after your task (kebab-case, e.g. `parse-jwt-expiry-edge-case`)
-3. Use `example_tasks/jwt-claims-validator/` as a reference for structure and conventions
-4. Run locally to verify: `bash tasks/<your-task>/setup.sh && python tasks/<your-task>/tests/test.py`
-5. Open a PR for review
+Each task is a software engineering problem that frontier AI models **fail without a custom skill** but can solve once given one. Your job is to write that skill.
 
 ---
 
-## Task Directory Structure
+## Getting Started
 
-```
-<task-name>/
-├── metadata.json            # Task config: skills, failure modes, file refs
-├── instruction.md           # The prompt the model receives (no skill hints)
-├── setup.sh                 # All apt/pip installs + env setup
-├── input_files/             # Files placed in /app/ at runtime
-│   └── .gitkeep             # Keep even if empty
-├── tests/
-│   └── test.py              # Single verifier — must print "pass" or "fail" to stdout
-├── skills/
-│   ├── <golden-skill>/
-│   │   ├── SKILL.md         # Skill document: when to use, approach, edge cases, scripts
-│   │   └── scripts/         # Helper scripts + unit tests
-│   ├── <distractor-1>/
-│   │   ├── SKILL.md
-│   │   └── scripts/
-│   └── ...                  # 3–5 distractors total
-├── solution/
-│   └── solve.sh             # Oracle solution — must make test.py pass
-└── trajectories/
-    └── .gitkeep             # Client populates this; leave empty
-```
+All tasks are assigned through Airtable. When you claim a task, a GitHub repository and branch are automatically set up for you.
 
----
+### Step 1 — Claim your task in Airtable
 
-## File-by-File Guide
+Open your task list in the Airtable interface and claim a task. Within ~5 minutes:
+- A GitHub repo (`mercor-code-envs/skills-<your-id>`) is created for you
+- A branch (`skills-<task-id>`) is created with the task files already committed
+- You are added as a collaborator on the repo
+- Your task status updates to **In Progress**
 
-### `metadata.json`
+### Step 2 — Clone your repo and checkout your task branch
 
-```json
-{
-  "task_name": "your-task-name",
-  "category": "Descriptive category string, e.g. Authentication & Security, Systems Programming, ML / Distributed Computing",
-  "input_files": ["file1.py", "file2.json"],
-  "test_file": "tests/test.py",
-  "solution_file": "solution/solve.sh",
-  "golden_skills": ["golden-skill-name"],
-  "distractor_skills": ["distractor-1", "distractor-2", "distractor-3", "distractor-4"]
-}
-```
-
-**Notes:**
-- `task_name` must match the directory name exactly
-- `golden_skills` is an array — include all golden skills (most tasks have 1–2)
-- Each skill name in `golden_skills` and `distractor_skills` must match the corresponding directory name under `skills/` exactly
-
----
-
-### `instruction.md`
-
-The prompt the model receives. Rules:
-- Describe the problem clearly — what exists at `/app`, what output is expected
-- **No hints** about which skill to use or how to approach the problem
-- Do not reference the golden skill by name or concept
-- Self-contained: a model with no context should understand the task from this alone
-
----
-
-### `setup.sh`
+Use the **Code - Clone Repo** command shown in Airtable:
 
 ```bash
-#!/bin/bash
-set -e
-
-# System packages
-apt-get update && apt-get install -y \
-    <package1> \
-    <package2>
-
-# Python packages
-pip install \
-    <package1> \
-    <package2>
+gh repo clone mercor-code-envs/skills-<your-id>
+cd skills-<your-id>
 ```
 
-- All dependencies that `test.py` or `solve.sh` need must be installed here
-- Even if no setup is needed, this file must exist (leave it as `#!/bin/bash` with `set -e`)
-- Do **not** include any logic that should be in `solve.sh`
+Then checkout your task branch (it already exists — the task files are there):
+
+```bash
+git fetch origin
+git checkout skills-<task-id>
+```
+
+> ⚠️ Do NOT use `git checkout -b` — your branch already exists with task files committed.
+> Use `git checkout skills-<task-id>` (no `-b` flag) to check out the existing branch.
+
+Your task is in `tasks/<task-slug>/`.
+
+### Step 3 — Download Harbor (for local evaluation)
+
+```bash
+pip install harbor-bench
+```
+
+Or follow the [Harbor install guide](https://github.com/Mercor-Intelligence/harbor).
 
 ---
 
-### `tests/test.py`
+## Your Task: What to Build
 
-- Single pytest entrypoint
-- Must print `pass` to stdout on success, `fail` on failure
-- Do not test the skill itself — test the task's oracle outcome
-- Verifier must be deterministic; avoid timing-based checks
+Inside `tasks/<task-slug>/` you will find:
 
-Pattern:
-```python
-import pytest
-import sys
-
-def test_main():
-    # ... your assertions ...
-    pass
-
-if __name__ == "__main__":
-    result = pytest.main([__file__, "-v"])
-    print("pass" if result == 0 else "fail")
 ```
+tasks/<task-slug>/
+├── Dockerfile              # ubuntu:24.04 — do not modify
+├── setup.sh                # Install/setup logic
+├── input_files/            # Task data files
+├── skills/                 # ← YOU FILL THIS IN
+│   └── .gitkeep
+├── instruction.md          # Problem statement (what the AI sees)
+├── metadata.json           # Fill in golden_skills, distractor_skills, failure_modes
+├── tests/
+│   └── test.py             # Verifier (do not modify)
+└── solution/
+    └── solve.sh            # Reference solution (do not modify)
+```
+
+You need to add **1 golden skill + 3–5 distractor skills** under `tasks/<task-slug>/skills/`.
 
 ---
 
-### `skills/<skill-name>/SKILL.md`
+## Step 4 — Run the Task Without Skills (Baseline)
+
+Confirm both agents fail before you write anything:
+
+```bash
+# Run without skills to see how agents fail
+harbor run -p tasks/<task-slug> -e modal -a terminus-2 \
+    -m "gemini/gemini-3.1-pro-preview"
+
+harbor run -p tasks/<task-slug> -e modal -a claude-code \
+    -m claude-opus-4-6
+```
+
+Both should score < 1.0. Note what each agent gets wrong — this tells you what the skill needs to teach.
+
+---
+
+## Step 5 — Write the Golden Skill
+
+Create `tasks/<task-slug>/skills/<skill-name>/SKILL.md`. The golden skill must:
+
+- Target the **specific failure mode** you observed (what did the agent miss?)
+- Be **general and reusable** — not a one-off hint for this exact task
+- Not contain the solution or a step-by-step recipe
+- Pass the format check:
+
+```bash
+python3 tooling/validate_skill_format.py tasks/<task-slug>/skills/<skill-name>/SKILL.md
+```
+
+**SKILL.md format:**
 
 ```markdown
 ---
 name: skill-name
-description: "One sentence: when to use this skill and what it covers."
+description: One sentence describing what this skill teaches and when to use it.
+tags: [tag1, tag2]
+version: "1.0"
 ---
 
-# Skill Title
+# Skill Name
 
-## When to use
+## When to Use
+...
 
-Describe the trigger condition precisely — what kind of task or problem should cause the model to select this skill.
+## Key Concepts
+...
 
-## Approach
-
-Step-by-step guidance for how to apply the skill. Be concrete and actionable.
-
-## Edge cases
-
-Common failure patterns and how to handle them.
-
-## Scripts
-
-- `scripts/helper.py` — What it does, usage: `python helper.py <args>`
-- `scripts/test_helper.py` — Unit test; run with `python test_helper.py`
+## Common Pitfalls
+...
 ```
 
-**Golden skill rules:**
-- General-purpose: must be useful beyond just this one task
-- Not a solution guide: don't describe how to solve the specific task
-- Minimal wording overlap with `instruction.md`
-- Scripts must have passing unit tests
+---
 
-**Distractor skill rules:**
-- Cosine similarity ≥ 0.6 with the golden skill on both name and description
-- Must pass the same SKILL.md formatting requirements as the golden skill
-- Must be plausible — a model should reasonably consider them relevant
+## Step 6 — Verify the Golden Skill Works
+
+Run `claude-code` with the skill in place:
+
+```bash
+harbor run -p tasks/<task-slug> -e modal -a claude-code -m claude-opus-4-6
+```
+
+Expected: score = **1.0**. If not, revise the skill and re-run. Check the trajectory to confirm the agent actually **read** the skill file.
 
 ---
 
-### `solution/solve.sh`
+## Step 7 — Write Distractor Skills
 
-The oracle solution. Must:
-- Run without errors after `setup.sh` has executed
-- Cause `python tests/test.py` to print `pass`
+Add 3–5 distractor skills: thematically related but describe different (wrong or irrelevant) approaches.
 
----
-
-## Difficulty Bar
-
-Your task must satisfy both conditions:
-
-| Condition | Requirement |
-|-----------|-------------|
-| Without skill | Model **fails** (reward = 0) |
-| With golden skill | Model **passes** and triggers the golden skill **autonomously** (no explicit skill nudge in the prompt) |
-
-If the model passes without the skill, the task is too easy — make it harder.
-If the model fails even with the skill, the skill needs more detail or the task needs adjustment.
+```bash
+# Check cosine similarity — each distractor must score ≥ 0.6 vs the golden skill
+python3 tooling/validate_skill_similarity.py \
+    tasks/<task-slug>/skills/<golden-skill>/SKILL.md \
+    tasks/<task-slug>/skills/<distractor-name>/SKILL.md
+```
 
 ---
 
-## Local Verification Checklist
+## Step 8 — End-to-End Validation
 
-Before opening a PR:
+With the full skill set in place, run both agents:
 
-- [ ] `bash tasks/<task-name>/setup.sh` exits 0
-- [ ] `python tasks/<task-name>/tests/test.py` prints `pass`
-- [ ] `bash tasks/<task-name>/solution/solve.sh && python tasks/<task-name>/tests/test.py` prints `pass`
-- [ ] `python tasks/<task-name>/skills/<skill>/scripts/test_*.py` passes for all skills
-- [ ] `metadata.json` is valid JSON and all referenced files exist
-- [ ] `instruction.md` contains no skill hints
-- [ ] Golden skill is general-purpose (not task-specific)
-- [ ] 3–5 distractor skills present with passing unit tests
+```bash
+harbor run -p tasks/<task-slug> -e modal -a terminus-2 \
+    -m "gemini/gemini-3.1-pro-preview"
+
+harbor run -p tasks/<task-slug> -e modal -a claude-code \
+    -m claude-opus-4-6
+```
+
+Both should score **1.0**.
+
+---
+
+## Step 9 — Fill in `metadata.json`
+
+```json
+{
+  "golden_skills": ["<skill-name>"],
+  "distractor_skills": ["<distractor-1>", "<distractor-2>", "<distractor-3>"],
+  "failure_modes": {
+    "gemini-3.1-pro": {
+      "result": "fail",
+      "reason": "<how the agent fails without skills>"
+    },
+    "claude-opus-4-6": {
+      "result": "fail",
+      "reason": "<how the agent fails without skills>"
+    },
+    "claude-opus-4-6-with-skills": {
+      "result": "pass",
+      "reason": "<which skill the agent read and how it helped>"
+    }
+  }
+}
+```
+
+Then run the full task validator:
+
+```bash
+python3 tooling/validate_task.py tasks/<task-slug>
+```
+
+---
+
+## Step 10 — Submit Your PR
+
+Use the **Code - Create PR** command shown in Airtable:
+
+```bash
+gh pr create --repo mercor-code-envs/skills-<your-id> \
+  --title "Task ID: [<airtable-task-id>]" \
+  --body "" \
+  --base main \
+  --assignee @me \
+  --draft
+```
+
+CI runs `validate_task.py` automatically on your PR. Fix any failures before marking ready for review.
+
+---
+
+## Deliverable Checklist
+
+Before submitting:
+
+- [ ] `tasks/<task-slug>/skills/<golden-skill>/SKILL.md` — passes format check
+- [ ] `tasks/<task-slug>/skills/<distractor-N>/SKILL.md` — 3–5 distractors, each ≥ 0.6 cosine similarity
+- [ ] `metadata.json` — all three `failure_modes` entries filled in
+- [ ] `claude-code` scores 1.0 with skills (Step 6)
+- [ ] Both agents score 1.0 with full skill set (Step 8)
+- [ ] `python3 tooling/validate_task.py tasks/<task-slug>` passes
+- [ ] PR created with title `Task ID: [<airtable-task-id>]`
+
+---
+
+## Quick Reference
+
+| Item | Value |
+|------|-------|
+| Environment | Modal (`-e modal`) |
+| claude-code model | `claude-opus-4-6` |
+| terminus-2 model | `gemini/gemini-3.1-pro-preview` (with `gemini/` prefix) |
+| Pass threshold | score = 1.0 |
+| Skills path in container | `/app/skills/` (terminus-2), `~/.claude/skills` (claude-code) |
