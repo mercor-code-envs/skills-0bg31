@@ -15,17 +15,19 @@ jobs:
           GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
         run: |
           python3 << 'EOF'
-          import json, subprocess, os, urllib.request
+          import json, re, subprocess, os, urllib.request, urllib.parse
 
           AT_TOKEN = os.environ["AT_TOKEN"]
           GH_TOKEN = os.environ["GH_TOKEN"]
           BASE = "appVMECzrlP3j1BFm"
           TABLE = "tblkLmyEvZfWY5J31"
+          EXPERT_TABLE = "tblNvesyHUH1E1sJZ"
 
-          # Tasks that are Claimed but not yet set up (time_in_progress is empty)
+          # Tasks claimed but not yet set up (time_in_progress empty)
           formula = "AND({task_status}='Claimed',{time_in_progress}='')"
-          fields = ["repo__task","title","s3_presigned_url","branch_name","repo","expert__id","airtable_task_id"]
-          url = f"https://api.airtable.com/v0/{BASE}/{TABLE}?filterByFormula={urllib.request.quote(formula)}"
+          fields = ["s3_presigned_url","branch_name","repo","expert__id","expert","airtable_task_id"]
+          url = (f"https://api.airtable.com/v0/{BASE}/{TABLE}"
+                 f"?filterByFormula={urllib.parse.quote(formula)}")
           for f in fields:
               url += f"&fields[]={f}"
 
@@ -39,17 +41,46 @@ jobs:
           for r in records:
               f = r["fields"]
               record_id = r["id"]
-              slug = f.get("repo__task", "")
               s3_url = f.get("s3_presigned_url", "")
               branch = f.get("branch_name", "")
-              repo = f.get("repo", "")
-              fork_repo = repo[0] if isinstance(repo, list) else str(repo)
+
+              # Derive slug from S3 URL (e.g. .../tasks/asyncio-pipeline-repair.zip?...)
+              slug_match = re.search(r"/tasks/([^.]+)\.zip", s3_url)
+              slug = slug_match.group(1) if slug_match else ""
+
+              # repo formula result (list or string)
+              repo_val = f.get("repo", "")
+              fork_repo = (repo_val[0] if isinstance(repo_val, list) else str(repo_val)).strip()
+
+              # expert_id lookup
+              expert_ids = f.get("expert__id", [])
+              expert_id = (expert_ids[0] if expert_ids else "").strip().lower()
+
+              # If repo is blank (expert not yet onboarded), derive fork from expert_id
+              if not fork_repo and expert_id:
+                  fork_repo = f"skills-{expert_id}"
+                  # Also set Expert.repo so future lookups work
+                  expert_links = f.get("expert", [])
+                  if expert_links:
+                      patch = json.dumps({"fields": {"repo": fork_repo}}).encode()
+                      req2 = urllib.request.Request(
+                          f"https://api.airtable.com/v0/{BASE}/{EXPERT_TABLE}/{expert_links[0]}",
+                          data=patch,
+                          headers={"Authorization": f"Bearer {AT_TOKEN}", "Content-Type": "application/json"},
+                          method="PATCH"
+                      )
+                      try:
+                          urllib.request.urlopen(req2)
+                          print(f"  Set Expert.repo = {fork_repo}")
+                      except Exception as e:
+                          print(f"  WARN: Could not set Expert.repo: {e}")
 
               if not slug or not fork_repo or not s3_url:
                   print(f"SKIP {record_id}: slug={slug!r} fork={fork_repo!r} s3={bool(s3_url)}")
                   continue
 
               print(f"Dispatching: {slug} -> {fork_repo}/{branch}")
+
               payload = json.dumps({
                   "ref": "main",
                   "inputs": {
