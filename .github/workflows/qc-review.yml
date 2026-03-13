@@ -1,0 +1,156 @@
+name: QC Review
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
+on:
+    # Runs when a PR is marked ready for review — gates QC on author intent
+    pull_request:
+        types: [ready_for_review]
+        branches:
+            - main
+        paths:
+            - "tasks/**"
+    workflow_dispatch:
+        inputs:
+            task_name:
+                description: "Task name to validate (e.g. jwt-claims-validator)"
+                required: false
+                type: string
+            checks:
+                description: "Comma-separated check names (default: json_checks)"
+                required: false
+                default: "json_checks"
+                type: string
+
+jobs:
+    qc-review:
+        name: QC Review
+        runs-on: ubuntu-latest
+        permissions:
+            pull-requests: write
+            contents: read
+        env:
+            AWS_ACCESS_KEY_ID: ${{ secrets.S3_AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_AWS_SECRET_ACCESS_KEY }}
+            AWS_DEFAULT_REGION: ${{ secrets.S3_AWS_REGION }}
+            QC_API_KEY: ${{ secrets.QC_API_KEY }}
+            S3_BUCKET_TEMP: ${{ secrets.S3_BUCKET_TEMP }}
+
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Detect changed task
+              id: detect
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  BASE_REF: ${{ github.base_ref }}
+                  INPUT_TASK: ${{ inputs.task_name }}
+              run: |
+                  if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                    if [ -n "$INPUT_TASK" ]; then
+                      echo "task=$INPUT_TASK" >> $GITHUB_OUTPUT
+                      echo "has_changes=true" >> $GITHUB_OUTPUT
+                    else
+                      echo "has_changes=false" >> $GITHUB_OUTPUT
+                    fi
+                  else
+                    BASE="origin/${BASE_REF}"
+                    CHANGED=$(git diff --name-only $BASE...HEAD \
+                      | grep '^tasks/' \
+                      | cut -d'/' -f1-2 \
+                      | sort -u \
+                      | head -1)
+                    if [ -z "$CHANGED" ]; then
+                      echo "has_changes=false" >> $GITHUB_OUTPUT
+                    else
+                      TASK=$(echo "$CHANGED" | sed 's|tasks/||')
+                      echo "task=$TASK" >> $GITHUB_OUTPUT
+                      echo "has_changes=true" >> $GITHUB_OUTPUT
+                    fi
+                  fi
+
+            - name: Set up Python
+              if: steps.detect.outputs.has_changes == 'true'
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+
+            - name: Install dependencies
+              if: steps.detect.outputs.has_changes == 'true'
+              run: |
+                  sudo apt-get update && sudo apt-get install -y zip
+                  pip install requests awscli
+
+            - name: Run QC
+              if: steps.detect.outputs.has_changes == 'true'
+              id: qc
+              continue-on-error: true
+              env:
+                  PYTHONUNBUFFERED: "1"
+              run: |
+                  python tooling/ci_scripts/task_qc.py \
+                    --task-name ${{ steps.detect.outputs.task }} \
+                    --checks "${{ inputs.checks || 'json_checks' }}"
+
+            - name: Post QC comment to PR
+              if: always() && steps.detect.outputs.has_changes == 'true'
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const fs = require('fs');
+
+                      // Resolve PR number (works for both pull_request and workflow_dispatch)
+                      let prNumber = undefined;
+                      if (context.eventName === 'pull_request' && context.payload.pull_request) {
+                        prNumber = context.payload.pull_request.number;
+                      } else {
+                        const ref = context.ref || '';
+                        const branch = ref.startsWith('refs/heads/') ? ref.replace('refs/heads/', '') : '';
+                        if (branch) {
+                          const { data: prs } = await github.rest.pulls.list({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            state: 'open',
+                            head: `${context.repo.owner}:${branch}`,
+                          });
+                          if (prs && prs.length > 0) prNumber = prs[0].number;
+                        }
+                      }
+
+                      if (!prNumber || !fs.existsSync('qc-comment.md')) return;
+
+                      const body = fs.readFileSync('qc-comment.md', 'utf8');
+                      const taskName = '${{ steps.detect.outputs.task }}';
+                      const marker = `<!-- skills-qc-${taskName} -->`;
+
+                      const { data: comments } = await github.rest.issues.listComments({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: prNumber,
+                      });
+
+                      const existing = comments.find(c =>
+                        c.user.login === 'github-actions[bot]' && c.body.includes(marker)
+                      );
+
+                      const params = {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        body,
+                      };
+
+                      if (existing) {
+                        await github.rest.issues.updateComment({ ...params, comment_id: existing.id });
+                      } else {
+                        await github.rest.issues.createComment({ ...params, issue_number: prNumber });
+                      }
+
+            - name: Fail if QC failed
+              if: steps.detect.outputs.has_changes == 'true' && steps.qc.outcome == 'failure'
+              run: |
+                  echo "QC validation failed — see comment above"
+                  exit 1
