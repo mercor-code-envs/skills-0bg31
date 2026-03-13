@@ -42,10 +42,10 @@ Your task is now at `tasks/<task-slug>/`.
 ### Step 3 — Install Harbor (for local evaluation)
 
 ```bash
-pip install harbor-bench
+pip install harbor
 ```
 
-Or follow the [Harbor install guide](https://github.com/Mercor-Intelligence/harbor).
+Or with uv: `uv tool install harbor`
 
 ---
 
