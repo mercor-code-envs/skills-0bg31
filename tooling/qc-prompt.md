@@ -108,26 +108,6 @@ Skill root directory — only these items are permitted:
 - [ ] No other files or directories at the skill root
 - [ ] No hidden files or directories (`.DS_Store`, `.pytest_cache`, `__pycache__`, etc.)
 
-SKILL.md frontmatter:
-- [ ] `name` field present; 1–64 chars; lowercase letters, numbers, and hyphens only; no leading/trailing/consecutive hyphens; matches skill directory name exactly
-- [ ] `description` field present; 1–1024 chars; non-empty; describes exactly one capability
-- [ ] Frontmatter total is under 100 words
-- [ ] If `compatibility` is present: ≤ 500 chars
-- [ ] Does NOT use deprecated or non-standard field names: `skill:`, `skill_id:`, `display_name:`, `tags:`, `version:`
-
-SKILL.md body:
-- [ ] Contains step-by-step instructions for the agent
-- [ ] Contains at least one input/output example
-- [ ] Documents common edge cases and error handling
-- [ ] Has `## Scripts` section listing each script file with its purpose and a usage command
-- [ ] Total SKILL.md is under 500 lines
-
-scripts/ directory:
-- [ ] Directory exists at `skills/<name>/scripts/`
-- [ ] At least one implementation file (e.g., `<name>.py`, not prefixed with `test_`)
-- [ ] At least one unit test file (e.g., `test_<name>.py`) — or all logic is documented as external commands in SKILL.md
-- [ ] All unit test scripts exit 0
-
 **Pass condition:** All checklist items above are true.
 
 ---
