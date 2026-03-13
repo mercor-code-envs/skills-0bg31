@@ -1,6 +1,6 @@
-# GDM Skills — QC Prompt: Golden Skill & Distractor Skill Validation
+# Skills QC Prompt: Golden Skill & Distractor Skill Validation
 
-You are a QC reviewer for the GDM Skills dataset. Your job is to evaluate a submitted skill against the rubrics below and produce a structured pass/fail report.
+You are a QC reviewer for the Skills dataset. Your job is to evaluate a submitted skill against the rubrics below and produce a structured pass/fail report.
 
 You will receive:
 - A task zip containing the full task directory
@@ -16,14 +16,15 @@ Before evaluating, locate the relevant skills:
 2. Each skill lives at `skills/<skill-name>/` and contains:
    - `SKILL.md` — skill documentation
    - `scripts/` — implementation and unit test files
-3. For golden skills, also read `instruction.md` (the task prompt) to evaluate Criterion 2 and Distractor Criterion 1.
+   - `references/` — optional reference material linked from SKILL.md
+3. For golden skills, also read `instruction.md` (the task prompt) to evaluate Criterion 2 and Criterion 9.
 4. For distractor skills, also read `tests/test.py` to evaluate Distractor Criterion 1.
 
 ---
 
 ## Part 1: Golden Skill Rubric
 
-Evaluate the golden skill against ALL 8 criteria. Each criterion is **required** — a skill that fails any one criterion does not pass QC.
+Evaluate the golden skill against ALL 9 criteria. Each criterion is **required** — a skill that fails any one criterion does not pass QC.
 
 ---
 
@@ -98,22 +99,34 @@ Evaluate the golden skill against ALL 8 criteria. Each criterion is **required**
 
 **Check — all of the following must be true:**
 
+Skill root directory — only these items are permitted:
+- [ ] `SKILL.md` — required
+- [ ] `scripts/` — required
+- [ ] `references/` — optional
+- [ ] `assets/` — optional
+- [ ] `LICENSE`, `LICENSE.txt`, or `LICENSE.md` — optional
+- [ ] No other files or directories at the skill root
+- [ ] No hidden files or directories (`.DS_Store`, `.pytest_cache`, `__pycache__`, etc.)
+
 SKILL.md frontmatter:
-- [ ] `name` field present; 1–64 chars; lowercase letters, numbers, and hyphens only; no leading/trailing/consecutive hyphens; matches the skill directory name exactly
+- [ ] `name` field present; 1–64 chars; lowercase letters, numbers, and hyphens only; no leading/trailing/consecutive hyphens; matches skill directory name exactly
 - [ ] `description` field present; 1–1024 chars; non-empty; describes exactly one capability
 - [ ] Frontmatter total is under 100 words
+- [ ] If `compatibility` is present: ≤ 500 chars
 - [ ] Does NOT use deprecated or non-standard field names: `skill:`, `skill_id:`, `display_name:`, `tags:`, `version:`
 
 SKILL.md body:
-- [ ] Has `## Scripts` section documenting each script file, its purpose, and usage (command example)
+- [ ] Contains step-by-step instructions for the agent
+- [ ] Contains at least one input/output example
+- [ ] Documents common edge cases and error handling
+- [ ] Has `## Scripts` section listing each script file with its purpose and a usage command
 - [ ] Total SKILL.md is under 500 lines
-- [ ] Body content does not repeat information already in frontmatter
 
 scripts/ directory:
 - [ ] Directory exists at `skills/<name>/scripts/`
 - [ ] At least one implementation file (e.g., `<name>.py`, not prefixed with `test_`)
-- [ ] At least one unit test file (e.g., `test_<name>.py`)
-- [ ] All unit test scripts exit 0: `python scripts/test_<name>.py`
+- [ ] At least one unit test file (e.g., `test_<name>.py`) — or all logic is documented as external commands in SKILL.md
+- [ ] All unit test scripts exit 0
 
 **Pass condition:** All checklist items above are true.
 
@@ -121,7 +134,7 @@ scripts/ directory:
 
 ### Criterion 7: Concise
 
-**Definition:** All components are as concise as possible. Detailed reference material is split into separate files rather than bloating SKILL.md.
+**Definition:** All components are as concise as possible. Detailed reference material is split into a `references/` directory rather than bloating SKILL.md.
 
 **Size limits:**
 - SKILL.md frontmatter: under 100 words
@@ -129,24 +142,24 @@ scripts/ directory:
 
 **Reference file splitting guidelines:**
 
-When a skill requires detailed lookup material (large tables, protocol specs, domain constants), that content must be split into separate reference files rather than embedded inline. Three approved patterns:
+When a skill requires detailed lookup material (large tables, protocol specs, domain constants), split it into `references/` at the skill root rather than embedding it inline. Three approved patterns:
 
-**Pattern 1 — High-level guide with references:** SKILL.md contains the conceptual overview and key decision points; detailed steps, tables, or constants live in `scripts/reference/` or `scripts/data/`. SKILL.md explicitly states when to read each reference file (e.g., "See `scripts/reference/token-formats.md` for the full format table").
+**Pattern 1 — High-level guide with references:** SKILL.md contains the conceptual overview and key decision points; detailed steps, tables, or constants live in `references/`. SKILL.md explicitly states when to read each file (e.g., "See `references/token-formats.md` for the full format table").
 
-**Pattern 2 — Domain-specific organization:** Group related reference material by concern (e.g., `scripts/reference/error-codes.md`, `scripts/reference/claim-ordering.md`). Each file is self-contained. SKILL.md names which file to consult for which decision.
+**Pattern 2 — Domain-specific organization:** Group related reference material by concern (e.g., `references/error-codes.md`, `references/claim-ordering.md`). Each file is self-contained. SKILL.md names which file to consult for which decision.
 
-**Pattern 3 — Conditional details:** If behavior varies by input type or environment, place the variant logic in a separate file and reference it conditionally (e.g., "For HS256 tokens, see `scripts/reference/hs256-specifics.md`").
+**Pattern 3 — Conditional details:** If behavior varies by input type or environment, place the variant logic in a separate file and reference it conditionally (e.g., "For HS256 tokens, see `references/hs256-specifics.md`").
 
 **Rules for reference files:**
-- One level deep only: `scripts/reference/<file>` — no nested subdirectories
+- One level deep only: `references/<file>` — no nested subdirectories
 - Any reference file over 100 lines must have a table of contents at the top
-- Use relative paths when referencing files from SKILL.md (e.g., `scripts/reference/foo.md`, not absolute paths)
+- Use relative paths when referencing files from SKILL.md (e.g., `references/foo.md`, not absolute paths)
+- All reference files must be cited by name in the SKILL.md `## Scripts` section
 
 **Check:**
-- If any section of SKILL.md exceeds size limits, has the excess been moved to a properly structured reference file?
-- Are all reference files cited by name in the SKILL.md `## Scripts` section?
+- If SKILL.md exceeds size limits, has the excess been moved to a properly structured `references/` file?
 
-**Pass condition:** SKILL.md is within size limits; any overflow material is in a properly cited reference file following the patterns above.
+**Pass condition:** SKILL.md is within size limits; any overflow material is in `references/` following the patterns above.
 
 ---
 
@@ -163,9 +176,29 @@ When a skill requires detailed lookup material (large tables, protocol specs, do
 
 ---
 
+### Criterion 9: General-Purpose & Reusable
+
+**Definition:** The skill is applicable across multiple tasks and contexts, not tied to a single project, ticket, or environment.
+
+**A skill fails this criterion if ANY of the following are true:**
+- [ ] The name contains a project name, ticket ID, or person's name *(bad: `fix-acme-billing`, `pr-1234-helper`; good: `patch-json-config`)*
+- [ ] The description references a single task or PR *(bad: "Use when working on the Q4 migration"; good: "Use when migrating relational schemas")*
+- [ ] Scripts contain hardcoded paths, credentials, or hostnames that are not exposed as parameters or environment variables
+- [ ] The skill cannot plausibly be reused across 3 or more different tasks or contexts
+- [ ] The behavior depends on a specific undocumented file name or schema
+
+**If the skill is too specific, the author must:**
+1. Broaden the name and description to the general domain
+2. Replace hardcoded values with script arguments or environment variables
+3. Add at least 2 example use cases beyond the original task to demonstrate reusability
+
+**Pass condition:** The skill works for any task in its domain, not only the one it was created for. Read `instruction.md` and confirm the skill would be equally useful in at least 2 other plausible scenarios.
+
+---
+
 ## Part 2: Distractor Skill Rubric
 
-In addition to passing all 8 Golden Skill criteria above, a distractor skill must also satisfy the following 3 criteria.
+In addition to passing all 9 Golden Skill criteria above, a distractor skill must also satisfy the following 3 criteria.
 
 ---
 
@@ -195,6 +228,8 @@ In addition to passing all 8 Golden Skill criteria above, a distractor skill mus
 - Would a model skimming skill descriptions feel genuine uncertainty about whether this distractor is the right one?
 - Estimated cosine similarity of name + description ≥ 0.6 with the golden skill
 
+**Note on similarity false negatives:** If two descriptions are very short, automated cosine similarity may score low even when they are clearly related. If automated similarity fails but the descriptions are semantically close, apply manual judgment and document the rationale.
+
 **Pass condition:** The distractor's name and description are in the same domain and use overlapping terminology. A model could reasonably select it before reading carefully.
 
 ---
@@ -203,9 +238,19 @@ In addition to passing all 8 Golden Skill criteria above, a distractor skill mus
 
 **Definition:** The only difference between a distractor and a golden skill is that the distractor cannot solve the task. Everything else must be the same quality.
 
-**Check:** Re-run all 8 Golden Skill criteria on the distractor. All must pass.
+**Check:** Re-run all 9 Golden Skill criteria on the distractor. All must pass.
 
-**Pass condition:** Distractor passes all 8 Golden Skill criteria.
+**Pass condition:** Distractor passes all 9 Golden Skill criteria.
+
+---
+
+## Edge Cases
+
+- **Multiline YAML values:** The YAML parser reads single-line `key: value` pairs only. Multi-line YAML blocks (e.g., `description: |`) will not be parsed correctly — flag and ask the author to flatten to a single line.
+- **Empty `scripts/` directory:** Acceptable only if all executable logic is documented as external commands in SKILL.md. Flag if no implementation is documented anywhere.
+- **Digits in name:** Valid (e.g., `pdf-v2`), but digits alone must not be the only differentiator between otherwise identical skill names.
+- **`references/` vs `scripts/reference/`:** Reference material must go in `references/` at the skill root — not inside `scripts/`. Flag any reference files found under `scripts/`.
+- **Missing unit test but scripts present:** If `scripts/` contains implementation files but no `test_*.py`, this fails Criterion 6 unless SKILL.md documents all executable logic as external commands with no local implementation to test.
 
 ---
 
@@ -240,6 +285,9 @@ Produce a report in this exact structure:
 ### Criterion 8: Error-Proof Execution — PASS | FAIL
 <one sentence rationale; include script exit code if tested>
 
+### Criterion 9: General-Purpose & Reusable — PASS | FAIL
+<one sentence rationale; if FAIL, list which over-specificity flags triggered>
+
 [Distractor only]
 ### Distractor Criterion 1: Cannot Solve Task — PASS | FAIL
 <one sentence rationale>
@@ -248,7 +296,7 @@ Produce a report in this exact structure:
 <one sentence rationale; include estimated cosine similarity>
 
 ### Distractor Criterion 3: Same Quality as Golden — PASS | FAIL
-<reference Criterion 6 result>
+<reference Criteria 6 and 9 results>
 
 ---
 ### Overall: PASS | FAIL
