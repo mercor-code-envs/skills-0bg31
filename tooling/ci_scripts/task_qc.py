@@ -145,7 +145,10 @@ def format_comment(result: dict, task_name: str, run_id: str) -> str:
     metadata = result.get("result_metadata", {})
     evaluation = metadata.get("evaluation", {})
     details = evaluation.get("details", {})
-    flagged = details.get("flagged_criteria", [])
+    if isinstance(details, str):
+        flagged = []
+    else:
+        flagged = details.get("flagged_criteria", [])
 
     status_emoji = STATUS_EMOJI.get(run_status, "⏳")
     severity = result.get("severity")
