@@ -68,7 +68,7 @@ tasks/<task-slug>/
     └── solve.sh            # Reference solution — do not modify
 ```
 
-You need to add **1 golden skill + 3–5 distractor skills** under `tasks/<task-slug>/skills/`.
+You need to add **2+ golden skills + 3–5 distractor skills** under `tasks/<task-slug>/skills/`.
 
 ---
 
@@ -88,11 +88,11 @@ Both should score < 1.0. Note what each agent gets wrong — this tells you what
 
 ---
 
-## Step 5 — Write the Golden Skill
+## Step 5 — Write the Golden Skills
 
-Create `tasks/<task-slug>/skills/<skill-name>/SKILL.md`. The golden skill must:
+Create `tasks/<task-slug>/skills/<skill-name>/SKILL.md`. The golden skills must:
 
-- Target the **specific failure mode** you observed
+- Target the **specific failure mode(s)** you observed
 - Be **general and reusable** — not a one-off hint for this exact task
 - Not contain the solution or a step-by-step recipe
 - Pass format validation:
@@ -125,13 +125,14 @@ version: "1.0"
 
 ---
 
-## Step 6 — Verify the Golden Skill Works
+## Step 6 — Verify the Golden Skills Work
 
 ```bash
 harbor run -p tasks/<task-slug> -e modal -a claude-code -m claude-opus-4-6
 ```
 
 Expected: score = **1.0**. Revise and re-run if not. Confirm the agent actually read the skill file in the trajectory.
+The agent must use **all skills** in order to be considered passing.
 
 ---
 
