@@ -5,7 +5,6 @@ concurrency:
     cancel-in-progress: true
 
 on:
-    # Runs when a PR is marked ready for review — gates QC on author intent
     pull_request:
         types: [opened, synchronize, reopened]
         branches:
@@ -17,11 +16,6 @@ on:
             task_name:
                 description: "Task name to validate (e.g. jwt-claims-validator)"
                 required: false
-                type: string
-            checks:
-                description: "Comma-separated check names (default: json_checks)"
-                required: false
-                default: "json_checks"
                 type: string
 
 jobs:
@@ -36,7 +30,9 @@ jobs:
             AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_AWS_SECRET_ACCESS_KEY }}
             AWS_DEFAULT_REGION: ${{ secrets.S3_AWS_REGION }}
             QC_API_KEY: ${{ secrets.APEX_API_KEY }}
+            VALIDATION_API_URL: ${{ secrets.VALIDATION_API_URL }}
             S3_BUCKET_TEMP: ${{ secrets.S3_BUCKET_TEMP }}
+            GITHUB_WRITER: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login || github.actor }}
 
         steps:
             - uses: actions/checkout@v4
@@ -93,8 +89,7 @@ jobs:
                   PYTHONUNBUFFERED: "1"
               run: |
                   python tooling/ci_scripts/task_qc.py \
-                    --task-name ${{ steps.detect.outputs.task }} \
-                    --checks "${{ inputs.checks || 'json_checks' }}"
+                    --task-name ${{ steps.detect.outputs.task }}
 
             - name: Post QC comment to PR
               if: always() && steps.detect.outputs.has_changes == 'true'

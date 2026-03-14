@@ -18,8 +18,10 @@ from pathlib import Path
 
 import requests
 
-QC_API_URL = os.environ.get("QC_API_URL", "https://coil.mercor.com/code-data/qc/validation-runs")
+QC_API_URL = os.environ.get("VALIDATION_API_URL")
 S3_BUCKET = os.environ.get("S3_BUCKET_TEMP")
+
+_PROMPT_PATH = Path(__file__).parent.parent / "qc-prompt.md"
 
 MAX_POLL_TIME = 800
 POLL_INTERVAL = 10
@@ -99,15 +101,16 @@ def make_request(method: str, url: str, api_key: str, body: dict | None = None) 
         sys.exit(1)
 
 
-def trigger_validation(s3_url: str, api_key: str, checks: list[str]) -> str:
+def trigger_validation(s3_url: str, api_key: str, check_name: str) -> str:
+    prompt = _PROMPT_PATH.read_text()
     payload = {
-        "project": "gdm-skill",
-        "task_type": "custom",
         "s3_url": s3_url,
-        "checks": checks,
+        "prompt": prompt,
+        "github_writer": os.environ.get("GITHUB_WRITER", ""),
     }
-    print(f"Triggering QC with checks: {checks}")
-    response = make_request("POST", QC_API_URL, api_key, payload)
+    url = f"{QC_API_URL}/custom"
+    print("Triggering QC via /custom endpoint")
+    response = make_request("POST", url, api_key, payload)
     run_id = response["id"]
     print(f"Validation run ID: {run_id}")
     return run_id
@@ -226,12 +229,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run QC validation for a skills task")
     parser.add_argument("--task-name", required=True, help="Task directory name under tasks/")
     parser.add_argument("--task-dir", help="Override task directory path")
-    parser.add_argument("--checks", default="json_checks", help="Comma-separated check names (default: json_checks)")
+    parser.add_argument("--check-name", default="skill_qc", help="Check name to run (default: skill_qc)")
     args = parser.parse_args()
 
     api_key = os.environ.get("QC_API_KEY")
     if not api_key:
         print("QC_API_KEY environment variable not set", file=sys.stderr)
+        sys.exit(1)
+
+    if not QC_API_URL:
+        print("VALIDATION_API_URL environment variable not set", file=sys.stderr)
         sys.exit(1)
 
     if not S3_BUCKET:
@@ -248,15 +255,13 @@ def main() -> None:
         print(f"Task directory not found: {task_dir}", file=sys.stderr)
         sys.exit(1)
 
-    checks = [c.strip() for c in args.checks.split(",") if c.strip()]
-
     archive_path = None
     s3_url = None
 
     try:
         archive_path = package_task(task_dir, args.task_name)
         s3_url = upload_to_s3(archive_path, args.task_name)
-        run_id = trigger_validation(s3_url, api_key, checks)
+        run_id = trigger_validation(s3_url, api_key, args.check_name)
         result = poll_for_results(run_id, api_key)
 
         # Write JSON report

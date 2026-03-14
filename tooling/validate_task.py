@@ -156,6 +156,11 @@ def check_metadata(task_dir: Path, task_name: str) -> dict | None:
             warn(f"metadata.json distractor_skills is empty (fill in after writing skills)")
     elif len(distractors) > 5:
         error(f"metadata.json distractor_skills has {len(distractors)} items; maximum is 5")
+    elif isinstance(golden, list) and len(distractors) < len(golden):
+        error(
+            f"metadata.json distractor_skills ({len(distractors)}) must be >= "
+            f"golden_skills ({len(golden)})"
+        )
 
     if not isinstance(meta.get("input_files", []), list):
         error("metadata.json input_files must be an array")

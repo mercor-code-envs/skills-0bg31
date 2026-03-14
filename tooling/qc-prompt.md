@@ -99,6 +99,9 @@ Evaluate the golden skill against ALL 9 criteria. Each criterion is **required**
 
 **Check — all of the following must be true:**
 
+metadata.json (task root, evaluated when reviewing any skill in the task):
+- [ ] `distractor_skills` count ≥ `golden_skills` count
+
 Skill root directory — only these items are permitted:
 - [ ] `SKILL.md` — required
 - [ ] `scripts/` — required
