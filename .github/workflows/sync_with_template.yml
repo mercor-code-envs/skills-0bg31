@@ -1,0 +1,68 @@
+# Sync from template branch while keeping the local tasks/ folder unchanged.
+# The template cannot overwrite or delete contents of tasks/.
+# Template is fixed in this file; it cannot be overridden when running the workflow.
+#
+# Branch protection: Pushing to main requires a token that can bypass protection.
+# 1. Create a repo secret PAT_TOKEN (PAT or fine-grained token with Contents: Read and write).
+# 2. In Settings → Branches → main → "Allow specified actors to bypass required pull requests",
+#    add the user (or bot) that owns the token so the workflow push is allowed.
+
+name: Sync from template
+
+on:
+    workflow_dispatch:
+
+env:
+    TEMPLATE_REPO: mercor-code-envs/skills-template
+    TEMPLATE_BRANCH: main
+
+jobs:
+    sync:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Require sync token (for branch protection bypass)
+              run: |
+                  if [ -z "${{ secrets.SYNC_TOKEN }}" ]; then
+                    echo "::error::Add repo secret SYNC_TOKEN (PAT with repo scope) so the workflow can push to protected main. See workflow comments."
+                    exit 1
+                  fi
+
+            - name: Checkout repository
+              uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0
+                  token: ${{ secrets.SYNC_TOKEN }}
+
+            - name: Configure Git
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            - name: Add template remote and fetch
+              run: |
+                  git remote add template "https://github.com/${{ env.TEMPLATE_REPO }}.git" 2>/dev/null || \
+                    git remote set-url template "https://github.com/${{ env.TEMPLATE_REPO }}.git"
+                  git fetch template "${{ env.TEMPLATE_BRANCH }}"
+
+            # --allow-unrelated-histories: needed when this repo wasn't forked from the template
+            # (e.g. "Use this template" creates a new history). Safe to use on every run.
+            - name: Merge template branch (no-edit)
+              run: |
+                  git merge "template/${{ env.TEMPLATE_BRANCH }}" --no-edit --no-ff --allow-unrelated-histories
+
+            - name: Restore tasks folder (ignore template changes under tasks/)
+              run: |
+                  git checkout ORIG_HEAD -- tasks/
+
+            - name: Commit and push if tasks were restored
+              run: |
+                  if ! git diff --staged --quiet || ! git diff --quiet; then
+                    git add tasks/
+                    git commit -m "chore: keep local tasks folder after template sync"
+                    git push
+                  else
+                    echo "No changes to tasks/ or already in sync."
+                  fi
