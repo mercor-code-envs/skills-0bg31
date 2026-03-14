@@ -140,8 +140,8 @@ def check_metadata(task_dir: Path, task_name: str) -> dict | None:
         )
 
     golden = meta.get("golden_skills", [])
-    if not isinstance(golden, list) or len(golden) == 0:
-        error("metadata.json golden_skills must be a non-empty array")
+    if not isinstance(golden, list) or len(golden) < 2:
+        error(f"metadata.json golden_skills must have at least 2 items (got {len(golden) if isinstance(golden, list) else 0})")
     elif len(golden) > 2:
         error(f"metadata.json golden_skills has {len(golden)} items; maximum is 2")
 
@@ -149,11 +149,7 @@ def check_metadata(task_dir: Path, task_name: str) -> dict | None:
     if not isinstance(distractors, list):
         error("metadata.json distractor_skills must be an array")
     elif len(distractors) < 3:
-        # Only error if golden_skills are also filled — TODOs are expected initially
-        if golden and any(s for s in golden):
-            error(f"metadata.json distractor_skills has {len(distractors)} items; minimum is 3")
-        else:
-            warn(f"metadata.json distractor_skills is empty (fill in after writing skills)")
+        error(f"metadata.json distractor_skills must have at least 3 items (got {len(distractors)})")
     elif len(distractors) > 5:
         error(f"metadata.json distractor_skills has {len(distractors)} items; maximum is 5")
     elif isinstance(golden, list) and len(distractors) < len(golden):
