@@ -1,0 +1,103 @@
+FROM python:3.12-slim-bookworm
+
+# Install apt packages
+RUN apt-get update && apt-get install -y \
+    apt-utils \
+    bash \
+    curl \
+    default-jre \
+    dbus-x11 \
+    dnsutils \
+    ed \
+    ffmpeg \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    gedit \
+    git \
+    gpg \
+    inotify-tools \
+    iproute2 \
+    jq \
+    kolourpaint \
+    locales \
+    lynx \
+    man-db \
+    nano \
+    net-tools \
+    nodejs \
+    netcat-openbsd \
+    npm \
+    openssh-server \
+    openssl \
+    pandoc \
+    poppler-utils \
+    procps \
+    scrot \
+    strace \
+    sudo \
+    texlive-xetex \
+    tmux \
+    tree \
+    vim \
+    wget \
+    x11vnc \
+    x11-xserver-utils \
+    xdotool \
+    xfce4 \
+    xfce4-screenshooter \
+    xfce4-terminal \
+    xvfb \
+    xxd \
+    zip \
+    firefox-esr \
+    chromium \
+    libnss3-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pip packages
+RUN pip install --no-cache-dir \
+    aiohttp \
+    bs4 \
+    catboost \
+    dnslib \
+    fastai \
+    fastapi \
+    ggplot \
+    google-api-python-client \
+    grpcio \
+    grpcio-tools \
+    html2text \
+    huggingface_hub \
+    inotify \
+    keras \
+    lark \
+    libtmux \
+    lightgbm \
+    markdownify \
+    matplotlib \
+    mcp \
+    numpy \
+    openpyxl \
+    optuna \
+    pandas \
+    pillow \
+    'pip-system-certs<5.0' \
+    playwright \
+    protobuf \
+    psutil \
+    pyautogui \
+    pymupdf \
+    PySocks \
+    pytest \
+    pytype \
+    requests \
+    scikit-learn \
+    scipy \
+    seaborn \
+    tensorflow \
+    tensorflow-datasets \
+    torch \
+    torchvision \
+    uvicorn \
+    weasyprint \
+    xgboost

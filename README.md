@@ -2,8 +2,6 @@
 
 Each task is a software engineering problem that frontier AI models **fail without a custom skill** but can solve once given one. Your job is to write that skill.
 
----
-
 ## 1. Purpose
 
 This repository contains Skills tasks designed to measure whether a model can select and use the correct reasoning skill to solve a software-engineering problem.
@@ -115,12 +113,11 @@ tasks/<task-slug>/
         └── ...
 ```
 
----
-
-## 4. Getting Started
+## 4. Step-by-step Workflow
 
 All tasks are assigned through Airtable. When you claim a task, a GitHub repository is automatically forked for you within ~5 minutes.
 
+<!--
 ### Step 0 -- Setup GitHub CLI (required)
 
 Follow the GitHub CLI Quickstart:
@@ -162,8 +159,9 @@ Your task is now at `tasks/<task-slug>/`.
 >   --s3-url "<presigned url from airtable>" \
 >   --task-name "<task name from airtable>"
 > ```
+-->
 
-### Step 3 -- Install prerequisites
+### Step 1 -- Install prerequisites
 
 **Harbor** (local evaluation harness):
 ```bash
@@ -178,13 +176,22 @@ export ANTHROPIC_API_KEY=sk-ant-...   # for claude-code agent
 export GEMINI_API_KEY=AIza...         # for terminus-2 agent
 ```
 
+You can get an OpenRouter subscription for this project; you will be reimbursed up to $10 per merged task.
+
 **Docker Desktop** must be running for all `docker` and `harbor` commands.
 
----
+**Base image** — build once per machine before running any tasks:
+```bash
+docker buildx build --platform linux/amd64 --load \
+  -f Dockerfile.base -t gdm-base:latest .
+```
+This creates the `gdm-base:latest` image that all task Dockerfiles inherit from. Only needed once.
 
-## 5. Step-by-Step Workflow
+If you use plain `docker build` on Apple Silicon, Docker may create a native
+`arm64` image. Later task builds and Harbor runs may fail if the task expects
+`linux/amd64`, so prefer the `buildx --platform linux/amd64 --load` form above.
 
-### Step 4 -- Build the Docker image and confirm the baseline fails
+### Step 2 -- Build the Docker image and confirm the baseline fails
 
 **Build the image** (runs `docker build` internally):
 ```bash
@@ -231,7 +238,19 @@ memory_mb = 4096
 storage_mb = 10240
 ```
 
-Then run (image already built above, `docker_image` in task.toml tells Harbor to use it):
+`docker_image` must exactly match the local image tag. The image already built
+above via `python3 tooling/build.py --task-slug <task-slug>` uses `<task-slug>`
+as the local tag, and the `docker_image` field tells Harbor to use that
+pre-built image instead of rebuilding from `tasks/<task-slug>/environment`.
+
+On Apple Silicon or any setup where the task image was built as `linux/amd64`,
+set:
+
+```bash
+export DOCKER_DEFAULT_PLATFORM=linux/amd64
+```
+
+Then run:
 ```bash
 # terminus-2 — gemini-3.1-pro-preview
 harbor run -p tasks/<task-slug> -e docker --no-force-build \
@@ -243,7 +262,13 @@ harbor run -p tasks/<task-slug> -e docker --no-force-build \
 ```
 Both should score **0.0**. Note what each agent gets wrong — this tells you what the skill needs to teach.
 
-### Step 5 -- Write the golden skills
+Common Harbor/prebuilt-image failure modes:
+
+- `docker_image = "<task-slug>"` left as a literal placeholder in `task.toml`
+- missing local `<task-slug>:latest` image, causing Harbor to try pulling from a registry
+- wrong architecture, where the local image exists but not for `linux/amd64`
+
+### Step 3 -- Write the golden skills
 
 Create `tasks/<task-slug>/skills/<skill-name>/` with three things: the SKILL.md document, helper code, and tests.
 
@@ -252,6 +277,83 @@ The golden skills must:
 - Target the **specific failure mode(s)** you observed
 - Be **general and reusable** -- not a one-off hint for this exact task
 - Not contain the solution or a step-by-step recipe
+
+**Before writing any skill, inspect a real model failure first.**
+
+Only use runs where:
+
+- `Trials = 1`
+- `Errors = 0`
+- the agent actually reached the verifier
+
+If Harbor shows `Trials = 0`, `AuthenticationError`, image-pull errors, Docker
+platform errors, or other environment/setup failures, do **not** design skills
+from that run. Fix the environment first and rerun.
+
+**Recommended failure-inspection workflow:**
+
+1. Find the failing run:
+
+```bash
+ls -1dt jobs/*/
+```
+
+2. Check the high-level result:
+
+```bash
+cat jobs/<timestamp>/result.json
+cat jobs/<timestamp>/job.log
+```
+
+3. Inspect what the verifier actually failed on:
+
+```bash
+cat jobs/<timestamp>/<trial-name>/verifier/test-stdout.txt
+```
+
+This is the most important file for identifying the real missing behavior.
+
+4. Inspect what the agent actually did:
+
+```bash
+cat jobs/<timestamp>/<trial-name>/agent/trajectory.json
+```
+
+Or use the viewer:
+
+```bash
+harbor view jobs/
+```
+
+Look for:
+
+- which files the agent opened
+- which wrong hypothesis it followed
+- whether it fixed a symptom but missed a hidden check
+- whether it ignored an important config/template/reset path
+
+**How to turn failure into skills:**
+
+- Start from the verifier failures, not from your intuition.
+- Group related failures into 1-2 reusable concepts.
+- Write skills that teach the **missing pattern**, not the task answer.
+- If the failure is about a recurring implementation shape, include a helper
+  script that demonstrates that shape in a general way.
+- If the failure is about persistence or configuration management, teach the
+  source-of-truth pattern rather than the exact file names from the task.
+
+**Good skill targets:**
+
+- a model keeps fixing the live config but misses the template/reset source
+- a model uses an AD-style `memberOf` flow where OpenLDAP needs group-entry
+  `member=<user DN>` lookups
+- a model repeatedly applies escaping or validation in the wrong order
+
+**Bad skill targets:**
+
+- "change `/app/config/foo.json` line 7 to X"
+- "run these exact 4 commands for this task"
+- copying the oracle solution into `SKILL.md`
 
 **What you write for each skill:**
 
@@ -273,8 +375,6 @@ name: skill-name
 description: One sentence describing what this skill teaches and when to use it.
 tags: [tag1, tag2]
 version: "1.0"
----
-
 # Skill Name
 
 ## When to Use
@@ -298,7 +398,7 @@ Size constraints (`validate_skill_format.py` checks these):
 
 Allowed items inside each skill directory: `SKILL.md` (required), `scripts/` (required), `references/` (optional), `assets/` (optional), `LICENSE*` (optional). No hidden files.
 
-### Step 6 -- Verify the golden skills work
+### Step 4 -- Verify the golden skills work
 
 Rebuild the image so the new skills are baked in, then run both agents:
 
@@ -317,9 +417,36 @@ harbor run -p tasks/<task-slug> -e docker --no-force-build \
 
 Expected: score = **1.0** for both. If not, check `jobs/<timestamp>/<task>/agent/trajectory.json` to see what the agent did and which skill files it read. Revise and re-run.
 
-### Step 7 -- Write distractor skills
+When a first "with-skills" run still fails, distinguish between:
 
-Add 3-5 distractor skills: thematically related but describe different (wrong or irrelevant) approaches. Validate similarity:
+- the skills being present but too weak, and
+- the model never actually reading the skill files
+
+Check the trajectory first. If the model did **not** open anything under
+`/app/skills/`, you can add a **generic** nudge during iteration to
+`tasks/<task-slug>/instruction.md`, such as:
+
+```text
+You have access to skill files in /app/skills/. Check them if they are relevant to the failure.
+```
+
+Do **not** name the exact skill folders in `instruction.md`. Use the nudge only
+to verify skill discovery during iteration. After the model passes with the
+golden skills and distractor skills in place, remove that temporary line from
+`tasks/<task-slug>/instruction.md`.
+
+### Step 5 -- Write distractor skills
+
+Add 3-5 distractor skills under `tasks/<task-slug>/skills/<skill-name>/`.
+
+Distractor skills should be thematically related to the task, but describe
+different, wrong, or irrelevant approaches compared with the golden skills.
+
+For distractors, helper code is **not required**. A `SKILL.md` plus an empty
+`scripts/` directory is enough. The validator still expects the `scripts/`
+folder to exist, even if you do not add runnable helper files inside it.
+
+Validate similarity:
 
 ```bash
 python3 tooling/validate_skill_similarity.py \
@@ -337,9 +464,9 @@ Cosine similarity thresholds:
 
 The QC rubric targets >= 0.6; the automated validator passes at >= 0.4.
 
-### Step 8 -- End-to-end validation
+### Step 6 -- End-to-end validation
 
-Rebuild the image (picks up any skill edits since Step 6), then run both agents:
+Rebuild the image (picks up any skill edits since Step 4), then run both agents:
 
 ```bash
 # Rebuild with full skill set (golden + distractors)
@@ -356,7 +483,7 @@ harbor run -p tasks/<task-slug> -e docker --no-force-build \
 
 Both should score **1.0**. Job results and trajectories are written to `jobs/<timestamp>/`.
 
-### Step 9 -- Fill in `metadata.json`
+### Step 7 -- Fill in `metadata.json`
 
 ```json
 {
@@ -385,7 +512,7 @@ Run the full task validator:
 python3 tooling/validate_task.py --task-path tasks/<task-slug>
 ```
 
-### Step 10 -- Commit, push, and open a PR
+### Step 8 -- Commit, push, and open a PR
 
 ```bash
 git add tasks/<task-slug>/
@@ -406,9 +533,7 @@ gh pr create --repo mercor-code-envs/skills-<your-id> \
 
 CI runs `validate_task.py` automatically on your PR. Fix any failures before marking ready for review.
 
----
-
-## 6. File Reference
+## 5. File Reference
 
 ### `Dockerfile`
 - Required file based on `task-base:latest`.
@@ -470,9 +595,7 @@ If the instruction already gives away what your golden skill teaches, either **(
   - **Test script** (`test_<name>.py`) -- unit tests (pytest) that verify the helper script works correctly. Tests should cover the key behaviors the skill teaches: correct outputs, edge cases, error conditions. Including tests is a **QC expectation** (`scripts/` is required, but `test_*.py` is not required by the validator).
 - All scripts must run without errors: exit 0, no import errors, no missing dependencies (QC criterion #8).
 
----
-
-## 7. Skill Design Standards
+## 6. Skill Design Standards
 
 ### Golden skills
 - Target observed baseline failure modes.
@@ -490,9 +613,7 @@ If the instruction already gives away what your golden skill teaches, either **(
 - 3-5 distractor skills per task.
 - Current examples use 2 golden + 4 distractors.
 
----
-
-## 8. Harbor Evaluation Environment
+## 7. Harbor Evaluation Environment
 
 All task evaluation runs through **Harbor**, an execution harness that builds the task's Docker container and runs an AI agent inside it locally using Docker.
 
@@ -517,9 +638,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # claude-code
 export GEMINI_API_KEY=AIza...         # terminus-2
 ```
 
----
-
-## 9. QC Rubric
+## 8. QC Rubric
 
 All skills (golden and distractor) are evaluated against a 9-criterion rubric defined in `tooling/qc-prompt.md`. A skill **passes QC only if every applicable criterion is PASS**.
 
@@ -541,9 +660,7 @@ All skills (golden and distractor) are evaluated against a 9-criterion rubric de
 2. **Maximally Relevant** -- name and description are in the same domain as the golden skill and use overlapping terminology. Target cosine similarity >= 0.6.
 3. **Same Quality as Golden Skills** -- must pass all 9 golden skill criteria above.
 
----
-
-## 10. `metadata.json` Schema Details
+## 9. `metadata.json` Schema Details
 
 ### Required fields
 
@@ -574,9 +691,7 @@ structured objects with 3 keys:
 
 The validator accepts either format but warns on `TODO` values. Record detailed descriptions of observed behavior including which skill files were read and the reward score.
 
----
-
-## 11. Common Mistakes To Avoid
+## 10. Common Mistakes To Avoid
 
 - Omitting `Dockerfile` from the task package.
 - Using `golden_skill` (singular) instead of `golden_skills` (plural) in metadata.
@@ -588,9 +703,7 @@ The validator accepts either format but warns on `TODO` values. Record detailed 
 - Hidden files (`.DS_Store`, `__pycache__`) left in skill directories.
 - Skill directory name not matching the `name` field in SKILL.md frontmatter.
 
----
-
-## 12. Deliverable Checklist
+## 11. Deliverable Checklist
 
 - [x] Task folder includes all required files (`Dockerfile`, `setup.sh`, `instruction.md`, `metadata.json`, `tests/test.py`, `solution/solve.sh`, `input_files/`, `skills/`).
 - [x] `instruction.md` is clear and skill-agnostic (no skill names or hints).
@@ -605,8 +718,6 @@ The validator accepts either format but warns on `TODO` values. Record detailed 
 - [x] Both agents score 1.0 with full skill set.
 - [x] `python3 tooling/validate_task.py --task-path tasks/<task-slug>` passes.
 - [x] PR opened with title `Task ID: [<airtable-task-id>]`.
-
----
 
 ## Quick Reference
 

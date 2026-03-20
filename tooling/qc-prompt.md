@@ -17,14 +17,14 @@ Before evaluating, locate the relevant skills:
    - `SKILL.md` — skill documentation
    - `scripts/` — implementation and unit test files
    - `references/` — optional reference material linked from SKILL.md
-3. For golden skills, also read `instruction.md` (the task prompt) to evaluate Criterion 2 and Criterion 9.
+3. For golden skills, also read `instruction.md` (the task prompt) to evaluate Criterion 2 and Criterion 6.
 4. For distractor skills, also read `tests/test.py` to evaluate Distractor Criterion 1.
 
 ---
 
 ## Part 1: Golden Skill Rubric
 
-Evaluate the golden skill against ALL 9 criteria. Each criterion is **required** — a skill that fails any one criterion does not pass QC.
+Evaluate the golden skill against ALL 6 criteria. Each criterion is **required** — a skill that fails any one criterion does not pass QC.
 
 ---
 
@@ -55,45 +55,7 @@ Evaluate the golden skill against ALL 9 criteria. Each criterion is **required**
 
 ---
 
-### Criterion 3: Deterministic Outputs
-
-**Definition:** For a given input/state, the skill produces a predictable result that a script can verify without LLM interpretation.
-
-**Check:**
-- Are the outputs of the skill's scripts exact and testable (specific bytes, specific error messages, specific return types)?
-- Can a verifier confirm success using `assert`, `isinstance`, `pytest.raises(match=...)`, or exact comparison — not fuzzy checks?
-- Is the critical path free of non-deterministic behavior (no uncontrolled randomness, no environment-dependent branching in core logic)?
-
-**Pass condition:** The skill's outputs are fully verifiable by a deterministic script.
-
----
-
-### Criterion 4: State-Aware
-
-**Definition:** The skill interacts with the environment (files, data structures, configs) rather than just returning text. It leaves a detectable side effect.
-
-**Check:**
-- Does applying the skill result in a file written to a specific path, a class or function importable from a specific module, or a data structure with a specific shape?
-- Can another tool or script detect the result of the skill being applied?
-
-**Pass condition:** The skill leaves a side effect that the verifier (`tests/test.py`) checks. A skill that only prints text or explains a concept fails this criterion.
-
----
-
-### Criterion 5: Robust Error Logic
-
-**Definition:** The skill specifies exact error messages and conditions so an agent can understand failures and recover.
-
-**Check:**
-- Does the SKILL.md specify exact `ValueError` messages (or equivalent) with the exact strings? (e.g., `"token expired"`, `"invalid token format"`)
-- Do the scripts raise errors with actionable messages when given invalid input?
-- Does the skill document what happens in each failure case?
-
-**Pass condition:** An agent reading the SKILL.md can predict exactly what error will be raised and why, and can use that to correct its implementation.
-
----
-
-### Criterion 6: Specification Compliance
+### Criterion 3: Specification Compliance
 
 **Definition:** The skill follows the required format specification exactly and includes all required components.
 
@@ -107,7 +69,6 @@ Skill root directory — only these items are permitted:
 - [ ] `scripts/` — required
 - [ ] `references/` — optional
 - [ ] `assets/` — optional
-- [ ] `LICENSE`, `LICENSE.txt`, or `LICENSE.md` — optional
 - [ ] No other files or directories at the skill root
 - [ ] No hidden files or directories (`.DS_Store`, `.pytest_cache`, `__pycache__`, etc.)
 
@@ -115,7 +76,7 @@ Skill root directory — only these items are permitted:
 
 ---
 
-### Criterion 7: Concise
+### Criterion 4: Concise
 
 **Definition:** All components are as concise as possible. Detailed reference material is split into a `references/` directory rather than bloating SKILL.md.
 
@@ -146,20 +107,21 @@ When a skill requires detailed lookup material (large tables, protocol specs, do
 
 ---
 
-### Criterion 8: Error-Proof Script Execution
+### Criterion 5: Error-Proof Script Execution
 
-**Definition:** All executable scripts in `scripts/` run without errors.
+**Definition:** All executable scripts in `scripts/` run without errors and all dependencies are available in the evaluation environment.
 
 **Check:**
-- Run `python scripts/test_<name>.py` for every test script — must exit 0
+- Run `pytest tests/test.py` — exit code 0 or 1 is acceptable (tests may fail without the solution applied); exit code 2 or higher means a collection or import error and is a **FAIL**
+- Confirm `tests/test.py` is in pytest format: all test logic must be in `def test_*()` functions, not bare top-level asserts or `if __name__ == "__main__"` print loops; pytest output must show standard pass/fail/skipped counts (e.g., `1 passed`, `2 failed`, `1 skipped`) — not ad-hoc print statements
 - Run each implementation script's usage example from the SKILL.md `## Scripts` section — must not raise uncaught exceptions
-- No import errors, no missing dependencies (all deps installable via `setup.sh`)
+- List all packages installed by `setup.sh` (look for `pip install`, `apt-get install`, `apt install`, `conda install`) — flag any package that is non-standard or unlikely to be available in the GDM evaluation Docker image
 
-**Pass condition:** Every script in `scripts/` executes without errors.
+**Pass condition:** Every script in `scripts/` executes without errors, and all dependencies installed by `setup.sh` are standard or confirmed available in the GDM image.
 
 ---
 
-### Criterion 9: General-Purpose & Reusable
+### Criterion 6: General-Purpose & Reusable
 
 **Definition:** The skill is applicable across multiple tasks and contexts, not tied to a single project, ticket, or environment.
 
@@ -181,7 +143,7 @@ When a skill requires detailed lookup material (large tables, protocol specs, do
 
 ## Part 2: Distractor Skill Rubric
 
-In addition to passing all 9 Golden Skill criteria above, a distractor skill must also satisfy the following 3 criteria.
+In addition to passing all 6 Golden Skill criteria above, a distractor skill must also satisfy the following 3 criteria.
 
 ---
 
@@ -221,9 +183,17 @@ In addition to passing all 9 Golden Skill criteria above, a distractor skill mus
 
 **Definition:** The only difference between a distractor and a golden skill is that the distractor cannot solve the task. Everything else must be the same quality.
 
-**Check:** Re-run all 9 Golden Skill criteria on the distractor. All must pass.
+**Check:** Re-run all 6 Golden Skill criteria on the distractor. All must pass.
 
-**Pass condition:** Distractor passes all 9 Golden Skill criteria.
+**Pass condition:** Distractor passes all 6 Golden Skill criteria.
+
+---
+
+## Trajectory Quality Checks
+
+If trajectory files are provided alongside the task (typically as `<task-name>-<model>-<condition>.json` files), inspect them for the following before signing off on the delivery:
+
+- **Skill condition labeling:** Trajectories with `-no-skill` in the filename must show the agent failing to complete the task (unsuccessful outcome) — a no-skill trajectory that passes the verifier is a **delivery blocker**.
 
 ---
 
@@ -233,7 +203,7 @@ In addition to passing all 9 Golden Skill criteria above, a distractor skill mus
 - **Empty `scripts/` directory:** Acceptable only if all executable logic is documented as external commands in SKILL.md. Flag if no implementation is documented anywhere.
 - **Digits in name:** Valid (e.g., `pdf-v2`), but digits alone must not be the only differentiator between otherwise identical skill names.
 - **`references/` vs `scripts/reference/`:** Reference material must go in `references/` at the skill root — not inside `scripts/`. Flag any reference files found under `scripts/`.
-- **Missing unit test but scripts present:** If `scripts/` contains implementation files but no `test_*.py`, this fails Criterion 6 unless SKILL.md documents all executable logic as external commands with no local implementation to test.
+- **Missing unit test but scripts present:** If `scripts/` contains implementation files but no `test_*.py`, this fails Criterion 3 unless SKILL.md documents all executable logic as external commands with no local implementation to test.
 
 ---
 
@@ -250,25 +220,16 @@ Produce a report in this exact structure:
 ### Criterion 2: Requires Instruction Following — PASS | FAIL
 <one sentence rationale; if PASS, name the specific idiosyncratic detail that requires reading>
 
-### Criterion 3: Deterministic Outputs — PASS | FAIL
-<one sentence rationale>
-
-### Criterion 4: State-Aware — PASS | FAIL
-<one sentence rationale>
-
-### Criterion 5: Robust Error Logic — PASS | FAIL
-<one sentence rationale>
-
-### Criterion 6: Specification Compliance — PASS | FAIL
+### Criterion 3: Specification Compliance — PASS | FAIL
 <list any failing checklist items; "All items pass" if none>
 
-### Criterion 7: Concise — PASS | FAIL
+### Criterion 4: Concise — PASS | FAIL
 <one sentence rationale; note if reference file splitting was needed and correctly applied>
 
-### Criterion 8: Error-Proof Execution — PASS | FAIL
-<one sentence rationale; include script exit code if tested>
+### Criterion 5: Error-Proof Execution — PASS | FAIL
+<one sentence rationale; include pytest exit code and any flagged setup.sh packages>
 
-### Criterion 9: General-Purpose & Reusable — PASS | FAIL
+### Criterion 6: General-Purpose & Reusable — PASS | FAIL
 <one sentence rationale; if FAIL, list which over-specificity flags triggered>
 
 [Distractor only]
@@ -279,12 +240,16 @@ Produce a report in this exact structure:
 <one sentence rationale; include estimated cosine similarity>
 
 ### Distractor Criterion 3: Same Quality as Golden — PASS | FAIL
-<reference Criteria 6 and 9 results>
+<reference Criteria 3 and 6 results>
 
 ---
 ### Overall: PASS | FAIL
 Failed criteria: <list or "none">
 Required actions: <specific fixes needed, or "none">
+
+[If trajectories provided]
+### Trajectory Check
+Condition labeling: CORRECT | MISMATCH (<details if mismatch>)
 ```
 
 A skill **passes QC** only if every applicable criterion is PASS. Any single FAIL means the skill must be revised before acceptance.

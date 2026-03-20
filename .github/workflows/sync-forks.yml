@@ -1,0 +1,44 @@
+name: Sync Forks
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — preview changes without applying"
+        type: boolean
+        default: false
+
+jobs:
+  sync-forks:
+    name: Sync Expert Fork Repos from Template
+    # Template guard: only run in the canonical template repo, not in any fork
+    if: github.repository == 'mercor-code-envs/skills-template'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tooling dependencies
+        run: pip install PyGithub
+
+      - name: Run fork sync
+        env:
+          GITHUB_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          ARGS="--template-repo mercor-code-envs/skills-template"
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python tooling/sync_forks.py $ARGS
