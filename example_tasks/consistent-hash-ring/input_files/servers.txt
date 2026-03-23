@@ -1,8 +1,0 @@
-cache-node-01.prod.internal
-cache-node-02.prod.internal
-cache-node-03.prod.internal
-cache-node-04.prod.internal
-cache-node-05.prod.internal
-cache-node-06.prod.internal
-cache-node-07.prod.internal
-cache-node-08.prod.internal

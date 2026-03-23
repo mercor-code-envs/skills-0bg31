@@ -1,7 +1,0 @@
-{
-  "issuer": "auth.example.com",
-  "audience": "api.example.com",
-  "token_expiry_seconds": 3600,
-  "clock_skew_tolerance_seconds": 5,
-  "algorithm": "HS256"
-}
