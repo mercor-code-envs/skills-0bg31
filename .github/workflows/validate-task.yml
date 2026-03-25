@@ -19,7 +19,7 @@ on:
 
 jobs:
     validate:
-        name: Validate Task Structure
+        name: Skills QC
         runs-on: ubuntu-latest
         permissions:
             pull-requests: write
@@ -60,14 +60,30 @@ jobs:
               with:
                   python-version: "3.11"
 
-            - name: Run validator
-              id: validate
+            - name: Install dependencies
+              if: steps.detect.outputs.has_changes == 'true'
+              run: pip install requests pyyaml
+
+            - name: Configure AWS credentials
+              if: steps.detect.outputs.has_changes == 'true'
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: us-east-1
+
+            - name: Run Skills QC
+              id: qc
               if: steps.detect.outputs.has_changes == 'true'
               continue-on-error: true
+              env:
+                  QC_API_KEY: ${{ secrets.QC_API_KEY }}
+                  VALIDATION_API_URL: ${{ secrets.VALIDATION_API_URL }}
+                  S3_BUCKET_TEMP: ${{ secrets.S3_BUCKET_TEMP }}
+                  GITHUB_WRITER: ${{ secrets.GITHUB_WRITER }}
               run: |
-                  python tooling/validate_task.py \
-                    --task-name "${{ steps.detect.outputs.task }}" \
-                    2>&1 | tee validation_output.txt
+                  python tooling/ci_scripts/task_qc.py \
+                    --task-name "${{ steps.detect.outputs.task }}"
                   echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
             - name: Post PR comment
@@ -77,45 +93,14 @@ jobs:
                   script: |
                       const fs = require('fs');
                       const taskName = '${{ steps.detect.outputs.task }}';
-                      const passed = '${{ steps.validate.outputs.exit_code }}' === '0';
+                      const marker = `<!-- skills-qc-${taskName} -->`;
 
-                      function parseOutput(filePath) {
-                        if (!fs.existsSync(filePath)) return { errors: [], warnings: [] };
-                        const content = fs.readFileSync(filePath, 'utf8');
-                        const errors = [];
-                        const warnings = [];
-                        let section = null;
-                        for (const line of content.split('\n')) {
-                          if (line.startsWith('Errors:'))   { section = 'errors';   continue; }
-                          if (line.startsWith('Warnings:')) { section = 'warnings'; continue; }
-                          if (line.startsWith('All checks passed')) { section = null; continue; }
-                          const match = line.match(/^\s+-\s+(.+)$/);
-                          if (match && section === 'errors')   errors.push(match[1]);
-                          if (match && section === 'warnings') warnings.push(match[1]);
-                        }
-                        return { errors, warnings };
+                      let body;
+                      if (fs.existsSync('qc-comment.md')) {
+                        body = fs.readFileSync('qc-comment.md', 'utf8');
+                      } else {
+                        body = marker + '\n## ❌ Skills QC — FAILED\n\n**Task:** `' + taskName + '`\n\nQC script did not produce output. Check workflow logs.\n\n---\n<sub>Automated by [validate-task](.github/workflows/validate-task.yml)</sub>';
                       }
-
-                      const { errors, warnings } = parseOutput('validation_output.txt');
-                      const icon = passed ? '✅' : '❌';
-                      const status = passed ? 'PASSED' : 'FAILED';
-
-                      let body = `## ${icon} Task Validation ${status}\n\n**Task:** \`${taskName}\`\n\n`;
-
-                      if (errors.length > 0) {
-                        body += `### Errors\n${errors.map(e => `- ${e}`).join('\n')}\n\n`;
-                      }
-                      if (warnings.length > 0) {
-                        body += `### Warnings\n${warnings.map(w => `- ⚠️ ${w}`).join('\n')}\n\n`;
-                      }
-                      if (passed) {
-                        body += '_All structural checks passed._\n\n';
-                      }
-
-                      body += `---\n<sub>Automated by [validate-task](.github/workflows/validate-task.yml)</sub>`;
-
-                      const marker = `<!-- validate-${taskName} -->`;
-                      body = marker + '\n' + body;
 
                       const { data: comments } = await github.rest.issues.listComments({
                         owner: context.repo.owner,
@@ -145,8 +130,8 @@ jobs:
                         });
                       }
 
-            - name: Fail if validation errors found
-              if: steps.detect.outputs.has_changes == 'true' && steps.validate.outputs.exit_code != '0'
+            - name: Fail if QC did not pass
+              if: steps.detect.outputs.has_changes == 'true' && steps.qc.outputs.exit_code != '0'
               run: |
-                  echo "Task validation failed — see errors above"
+                  echo "Skills QC failed — see PR comment for details"
                   exit 1

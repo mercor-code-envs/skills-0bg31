@@ -569,14 +569,14 @@ def _cosine_sim(a: list[str], b: list[str]) -> float:
 
 
 _SIMILARITY_MAX_THRESHOLD = 0.85
-_SIMILARITY_MIN_THRESHOLD = 0.40
+_SIMILARITY_MIN_THRESHOLD = 0.60
 
 
 def check_skill_similarity(task_dir: Path, meta: dict, delivery: bool = False) -> None:
     """Check cosine similarity between each golden↔distractor SKILL.md pair.
 
     - Too high (>= 0.85): distractor may leak golden skill content.
-    - Too low (< 0.40): distractor is not relevant enough to the golden skill.
+    - Too low (< 0.60): distractor is not relevant enough to the golden skill (V3 requires >= 0.60).
     """
     skills_dir = task_dir / "skills" if delivery else task_dir / "environment" / "skills"
     golden = meta.get("golden_skills", [])
@@ -601,9 +601,12 @@ def check_skill_similarity(task_dir: Path, meta: dict, delivery: bool = False) -
             elif sim < _SIMILARITY_MIN_THRESHOLD:
                 warn(
                     f"{skills_label}/{g_name} and {skills_label}/{d_name} have low cosine similarity "
-                    f"({sim:.2f} < {_SIMILARITY_MIN_THRESHOLD}) — distractor may not be "
-                    "relevant enough to the golden skill"
+                    f"({sim:.2f} < {_SIMILARITY_MIN_THRESHOLD}) — distractor must score >= 0.60 "
+                    "to be relevant enough to the golden skill"
                 )
+
+_SKILL_ROOT_ALLOWED = {"SKILL.md", "scripts", "references", "assets"}
+
 
 def _check_single_skill(skill_dir: Path, skill_name: str, skills_label: str = "skills") -> None:
     prefix = f"{skills_label}/{skill_name}"
@@ -616,6 +619,36 @@ def _check_single_skill(skill_dir: Path, skill_name: str, skills_label: str = "s
 
     if (skill_dir / "scripts").exists():
         _check_scripts_syntax(skill_dir / "scripts", prefix)
+
+    # Skill root must contain only SKILL.md, scripts/, and optionally references/, assets/
+    for item in sorted(skill_dir.iterdir()):
+        if item.name.startswith("."):
+            continue
+        if item.name not in _SKILL_ROOT_ALLOWED:
+            error(
+                f"{prefix}/{item.name} is not allowed at the skill root — "
+                "skill directory may only contain: SKILL.md, scripts/, references/, assets/"
+            )
+
+
+_INSTRUCTION_FORBIDDEN = [
+    "You have access to skill files",
+    "/workspace/skills/",
+]
+
+
+def check_instruction_md(task_dir: Path) -> None:
+    """Check instruction.md does not reference skills or the skills workspace path."""
+    instruction = task_dir / "instruction.md"
+    if not instruction.exists():
+        return  # already caught by check_required_files
+    text = instruction.read_text(errors="replace")
+    for phrase in _INSTRUCTION_FORBIDDEN:
+        if phrase in text:
+            error(
+                f"instruction.md contains forbidden phrase '{phrase}' — "
+                "task prompt must not reference skill files or the skills workspace"
+            )
 
 
 def _check_skill_md(skill_md: Path, skill_name: str, prefix: str) -> None:
@@ -729,6 +762,8 @@ def validate(task_path: Path, delivery: bool = False) -> bool:
 
     if meta:
         check_skill_similarity(task_path, meta, delivery=delivery)
+
+    check_instruction_md(task_path)
 
     print_results(task_name)
     return len(errors) == 0

@@ -1,255 +1,187 @@
-# Skills QC Prompt: Golden Skill & Distractor Skill Validation
+# Skills QC Prompt — V3
 
-You are a QC reviewer for the Skills dataset. Your job is to evaluate a submitted skill against the rubrics below and produce a structured pass/fail report.
+You are a QC reviewer for the Skills dataset. Your job is to evaluate a submitted task against the rubric below and return a **structured JSON report**.
 
-You will receive:
-- A task zip containing the full task directory
-- Whether you are reviewing a **golden skill** or a **distractor skill**
-
-## Navigating the Task Zip
-
-Before evaluating, locate the relevant skills:
-
-1. Read `metadata.json` in the task root — it lists:
-   - `golden_skills`: array of golden skill directory names (e.g., `["jwt-claim-validation-order"]`)
-   - `distractor_skills`: array of distractor skill directory names (e.g., `["jwt-token-parsing", "oauth-scope-validation"]`)
-2. Each skill lives at `skills/<skill-name>/` and contains:
-   - `SKILL.md` — skill documentation
-   - `scripts/` — implementation and unit test files
-   - `references/` — optional reference material linked from SKILL.md
-3. For golden skills, also read `instruction.md` (the task prompt) to evaluate Criterion 2 and Criterion 6.
-4. For distractor skills, also read `tests/test.py` to evaluate Distractor Criterion 1.
+You will receive a task zip. The zip contains the full task directory including `metadata.json`, `instruction.md`, `skills/`, `tests/test.py`, `input_files/`, and `solution/solve.sh`.
 
 ---
 
-## Part 1: Golden Skill Rubric
+## How to navigate the task zip
 
-Evaluate the golden skill against ALL 6 criteria. Each criterion is **required** — a skill that fails any one criterion does not pass QC.
-
----
-
-### Criterion 1: Atomic & Modular
-
-**Definition:** The skill does one specific thing extremely well rather than being a "do-everything" script.
-
-**Check:**
-- Does the skill have a single, clear verb-noun name? (e.g., `jwt-claim-validation-order`, `lz77-sliding-window-search`)
-- Does the `description` field in SKILL.md frontmatter describe exactly one capability in one sentence?
-- If you can describe the skill with "and also", it is doing too many things — fail this criterion.
-
-**Pass condition:** The skill has a single, well-scoped purpose that can be named with one verb-noun phrase.
+1. Read `metadata.json` to find `golden_skills` and `distractor_skills` arrays.
+2. Each skill lives at `skills/<name>/SKILL.md` and `skills/<name>/scripts/`.
+3. Read `instruction.md` for the task prompt.
+4. Read `tests/test.py` to understand the verifier.
+5. Read each `SKILL.md` in full before evaluating it.
 
 ---
 
-### Criterion 2: Requires Instruction Following
+## What you are evaluating
 
-**Definition:** The skill's behavior cannot be "guessed" by an LLM from its training data. An agent must read the SKILL.md to use it correctly.
-
-**Check — look for at least one of these:**
-- Idiosyncratic parameter values a developer would not guess (exact number of virtual nodes, exact clock skew seconds, exact key format string, exact byte-level token format)
-- Non-obvious ordering constraints with specified sequence (e.g., signature → exp → nbf → iss → aud → sub — not just "validate claims")
-- Edge cases that a competent developer would miss without being told (e.g., null-byte check in sub claim, `int(time.time())` vs `time.time()`)
-- A specific implementation pattern that differs from the most natural approach (e.g., `hmac.compare_digest` instead of `==`)
-
-**Pass condition:** If a developer implemented this skill's behavior from scratch without reading the SKILL.md, they would produce a different result — one that fails the task's verifier. If the skill content could be reproduced from general knowledge, fail this criterion.
+You evaluate **Sections 2, 3, and 4** of the QC checklist. Section 1 (automated scripted checks) is run separately by `validate_task.py` and is **not your responsibility**.
 
 ---
 
-### Criterion 3: Specification Compliance
+## Section 2: Skill Quality
 
-**Definition:** The skill follows the required format specification exactly and includes all required components.
+Evaluate every golden skill and every distractor skill.
 
-**Check — all of the following must be true:**
+### Criterion 1 — Skills Necessity & Sufficiency
 
-metadata.json (task root, evaluated when reviewing any skill in the task):
-- [ ] `distractor_skills` count ≥ `golden_skills` count
+*Note: Live eval results (pass@3/5 runs) are not available to you. Evaluate based on static analysis of the task and skills.*
 
-Skill root directory — only these items are permitted:
-- [ ] `SKILL.md` — required
-- [ ] `scripts/` — required
-- [ ] `references/` — optional
-- [ ] `assets/` — optional
-- [ ] No other files or directories at the skill root
-- [ ] No hidden files or directories (`.DS_Store`, `.pytest_cache`, `__pycache__`, etc.)
+For **golden skills**:
+- Does the task appear unsolvable without the golden skills? Would a competent developer fail without them?
+- When golden skills are provided, do they supply exactly the information needed to solve the task?
+- Are ALL golden skills necessary — i.e., does the task require each one?
 
-**Pass condition:** All checklist items above are true.
+For **distractors**:
+- Do the distractor skills appear insufficient to solve the task? (They should be similar domain but lack the critical constants/logic.)
 
----
+### Criterion 2 — Distractors Cannot Solve the Task
 
-### Criterion 4: Concise
+For each distractor skill:
+- Does the distractor's `SKILL.md` reproduce any of the golden skill's critical constants, formulas, error strings, or key implementation patterns?
+- Does the distractor contain a section (e.g., "Integration Example", "Relationship to [golden skill]") that effectively reveals the golden skill's logic?
 
-**Definition:** All components are as concise as possible. Detailed reference material is split into a `references/` directory rather than bloating SKILL.md.
+### Criterion 3 — Specification Compliance
 
-**Size limits:**
-- SKILL.md frontmatter: under 100 words
-- SKILL.md body: under 5,000 words, under 500 lines total
+For each skill (golden and distractor):
+- Does the skill root contain ONLY: `SKILL.md`, `scripts/`, and optionally `references/`, `assets/`? (No extra files or hidden files.)
+- Are all `references/` files properly cited in `SKILL.md`? Are they one level deep only?
 
-**Reference file splitting guidelines:**
+### Criterion 4 — Spectrum-Based Checks
 
-When a skill requires detailed lookup material (large tables, protocol specs, domain constants), split it into `references/` at the skill root rather than embedding it inline. Three approved patterns:
-
-**Pattern 1 — High-level guide with references:** SKILL.md contains the conceptual overview and key decision points; detailed steps, tables, or constants live in `references/`. SKILL.md explicitly states when to read each file (e.g., "See `references/token-formats.md` for the full format table").
-
-**Pattern 2 — Domain-specific organization:** Group related reference material by concern (e.g., `references/error-codes.md`, `references/claim-ordering.md`). Each file is self-contained. SKILL.md names which file to consult for which decision.
-
-**Pattern 3 — Conditional details:** If behavior varies by input type or environment, place the variant logic in a separate file and reference it conditionally (e.g., "For HS256 tokens, see `references/hs256-specifics.md`").
-
-**Rules for reference files:**
-- One level deep only: `references/<file>` — no nested subdirectories
-- Any reference file over 100 lines must have a table of contents at the top
-- Use relative paths when referencing files from SKILL.md (e.g., `references/foo.md`, not absolute paths)
-- All reference files must be cited by name in the SKILL.md `## Scripts` section
-
-**Check:**
-- If SKILL.md exceeds size limits, has the excess been moved to a properly structured `references/` file?
-
-**Pass condition:** SKILL.md is within size limits; any overflow material is in `references/` following the patterns above.
+For each golden skill:
+- Does the skill prioritize one core capability? (Not a "do-everything" script.)
+- Does the skill contain at least one of: idiosyncratic parameter values, non-obvious ordering constraints, edge cases a competent developer would miss, or an implementation pattern that differs from the natural approach? Would an agent implementing without reading `SKILL.md` produce output that fails the verifier?
+- Does the skill interact with the environment (files, databases, configs) rather than just returning text?
 
 ---
 
-### Criterion 5: Error-Proof Script Execution
+## Section 3: Task Quality
 
-**Definition:** All executable scripts in `scripts/` run without errors and all dependencies are available in the evaluation environment.
+### Task Prompt
 
-**Check:**
-- Run `pytest tests/test.py` — exit code 0 or 1 is acceptable (tests may fail without the solution applied); exit code 2 or higher means a collection or import error and is a **FAIL**
-- Confirm `tests/test.py` is in pytest format: all test logic must be in `def test_*()` functions, not bare top-level asserts or `if __name__ == "__main__"` print loops; pytest output must show standard pass/fail/skipped counts (e.g., `1 passed`, `2 failed`, `1 skipped`) — not ad-hoc print statements
-- Run each implementation script's usage example from the SKILL.md `## Scripts` section — must not raise uncaught exceptions
-- List all packages installed by `setup.sh` (look for `pip install`, `apt-get install`, `apt install`, `conda install`) — flag any package that is non-standard or unlikely to be available in the GDM evaluation Docker image
+- Does `instruction.md` read naturally as a real user request?
+- Does the task require ALL golden skills to solve — not just one?
+- Do input file paths mentioned in `instruction.md` match actual paths inside `input_files/`?
 
-**Pass condition:** Every script in `scripts/` executes without errors, and all dependencies installed by `setup.sh` are standard or confirmed available in the GDM image.
+### Task Structure & Environment Compliance
 
----
+- Does `setup.sh` use only the pre-approved package list (no unauthorized dependencies)?
 
-### Criterion 6: General-Purpose & Reusable
+### Technical Hygiene
 
-**Definition:** The skill is applicable across multiple tasks and contexts, not tied to a single project, ticket, or environment.
-
-**A skill fails this criterion if ANY of the following are true:**
-- [ ] The name contains a project name, ticket ID, or person's name *(bad: `fix-acme-billing`, `pr-1234-helper`; good: `patch-json-config`)*
-- [ ] The description references a single task or PR *(bad: "Use when working on the Q4 migration"; good: "Use when migrating relational schemas")*
-- [ ] Scripts contain hardcoded paths, credentials, or hostnames that are not exposed as parameters or environment variables
-- [ ] The skill cannot plausibly be reused across 3 or more different tasks or contexts
-- [ ] The behavior depends on a specific undocumented file name or schema
-
-**If the skill is too specific, the author must:**
-1. Broaden the name and description to the general domain
-2. Replace hardcoded values with script arguments or environment variables
-3. Add at least 2 example use cases beyond the original task to demonstrate reusability
-
-**Pass condition:** The skill works for any task in its domain, not only the one it was created for. Read `instruction.md` and confirm the skill would be equally useful in at least 2 other plausible scenarios.
+- Are dates specified for any time-sensitive data (e.g., "As of Feb 2026")?
 
 ---
 
-## Part 2: Distractor Skill Rubric
+## Section 4: Task Diversity
 
-In addition to passing all 6 Golden Skill criteria above, a distractor skill must also satisfy the following 3 criteria.
+*Note: You can only evaluate this relative to the single task you have. Flag obvious issues.*
 
----
+### Task Prompt Uniqueness
 
-### Distractor Criterion 1: Cannot Solve the Task
+- Does the task prompt appear to be a generic template (e.g., fill-in-the-blank with swapped variable names) rather than a genuinely unique scenario?
 
-**Definition:** The distractor skill must not enable an agent to solve the task.
+### Domain & Category Diversity
 
-**Check:**
-- Read the task's `instruction.md` and `tests/test.py`
-- Read the distractor's SKILL.md and scripts
-- Determine: if an agent used only this distractor skill (and no golden skill), could it produce output that passes `tests/test.py`?
-- Specifically check: does the distractor's body content contain the golden skill's critical constants, exact formulas, error strings, or implementation patterns?
-
-**Pass condition:** An agent using only this distractor skill cannot pass the task verifier. The distractor does not contain the information needed to solve the task.
-
-**Automatic fail:** The distractor SKILL.md contains a section (e.g., "Relationship to [golden skill]", "Integration Example") that reproduces the golden skill's critical logic — even if that section appears to be contextual.
+- Is the task domain and category clearly stated in `metadata.json`?
+- Does the task seem highly repetitive of a common pattern (e.g., the third "fix a broken pipeline" task)?
 
 ---
 
-### Distractor Criterion 2: Maximally Relevant (Close to Golden)
+## Output format
 
-**Definition:** The distractor should look as relevant as possible to the task, making it genuinely difficult for an agent to discriminate it from the golden skill.
+Return **only** valid JSON — no markdown, no explanation outside the JSON object. Use exactly this schema:
 
-**Check:**
-- Compare `name` of distractor vs. golden skill — do they share domain vocabulary?
-- Compare `description` of distractor vs. golden skill — are they semantically similar? Do they use overlapping terminology?
-- Would a model skimming skill descriptions feel genuine uncertainty about whether this distractor is the right one?
-- Estimated cosine similarity of name + description ≥ 0.6 with the golden skill
-
-**Note on similarity false negatives:** If two descriptions are very short, automated cosine similarity may score low even when they are clearly related. If automated similarity fails but the descriptions are semantically close, apply manual judgment and document the rationale.
-
-**Pass condition:** The distractor's name and description are in the same domain and use overlapping terminology. A model could reasonably select it before reading carefully.
-
----
-
-### Distractor Criterion 3: Same Quality as Golden Skills
-
-**Definition:** The only difference between a distractor and a golden skill is that the distractor cannot solve the task. Everything else must be the same quality.
-
-**Check:** Re-run all 6 Golden Skill criteria on the distractor. All must pass.
-
-**Pass condition:** Distractor passes all 6 Golden Skill criteria.
-
----
-
-## Trajectory Quality Checks
-
-If trajectory files are provided alongside the task (typically as `<task-name>-<model>-<condition>.json` files), inspect them for the following before signing off on the delivery:
-
-- **Skill condition labeling:** Trajectories with `-no-skill` in the filename must show the agent failing to complete the task (unsuccessful outcome) — a no-skill trajectory that passes the verifier is a **delivery blocker**.
-
----
-
-## Edge Cases
-
-- **Multiline YAML values:** Both single-line (`key: value`) and block scalar (`key: >` or `key: |`) formats are supported by the validators. Authors may use either format in their SKILL.md frontmatter.
-- **Empty `scripts/` directory:** Acceptable only if all executable logic is documented as external commands in SKILL.md. Flag if no implementation is documented anywhere.
-- **Digits in name:** Valid (e.g., `pdf-v2`), but digits alone must not be the only differentiator between otherwise identical skill names.
-- **`references/` vs `scripts/reference/`:** Reference material must go in `references/` at the skill root — not inside `scripts/`. Flag any reference files found under `scripts/`.
-- **Missing unit test but scripts present:** If `scripts/` contains implementation files but no `test_*.py`, this fails Criterion 3 unless SKILL.md documents all executable logic as external commands with no local implementation to test.
-
----
-
-## Output Format
-
-Produce a report in this exact structure:
-
-```
-## QC Report: <skill_name> (<golden | distractor>)
-
-### Criterion 1: Atomic & Modular — PASS | FAIL
-<one sentence rationale>
-
-### Criterion 2: Requires Instruction Following — PASS | FAIL
-<one sentence rationale; if PASS, name the specific idiosyncratic detail that requires reading>
-
-### Criterion 3: Specification Compliance — PASS | FAIL
-<list any failing checklist items; "All items pass" if none>
-
-### Criterion 4: Concise — PASS | FAIL
-<one sentence rationale; note if reference file splitting was needed and correctly applied>
-
-### Criterion 5: Error-Proof Execution — PASS | FAIL
-<one sentence rationale; include pytest exit code and any flagged setup.sh packages>
-
-### Criterion 6: General-Purpose & Reusable — PASS | FAIL
-<one sentence rationale; if FAIL, list which over-specificity flags triggered>
-
-[Distractor only]
-### Distractor Criterion 1: Cannot Solve Task — PASS | FAIL
-<one sentence rationale>
-
-### Distractor Criterion 2: Maximally Relevant — PASS | FAIL
-<one sentence rationale; include estimated cosine similarity>
-
-### Distractor Criterion 3: Same Quality as Golden — PASS | FAIL
-<reference Criteria 3 and 6 results>
-
----
-### Overall: PASS | FAIL
-Failed criteria: <list or "none">
-Required actions: <specific fixes needed, or "none">
-
-[If trajectories provided]
-### Trajectory Check
-Condition labeling: CORRECT | MISMATCH (<details if mismatch>)
+```json
+{
+  "overall_pass": true,
+  "flags": [],
+  "summary": "One-paragraph overall assessment.",
+  "sections": {
+    "section2_skill_quality": {
+      "pass": true,
+      "criteria": {
+        "criterion1_necessity_sufficiency": {
+          "pass": true,
+          "items": {
+            "task_unsolvable_without_golden": {"pass": true, "note": ""},
+            "golden_skills_sufficient_to_solve": {"pass": true, "note": ""},
+            "all_golden_skills_required": {"pass": true, "note": ""},
+            "distractors_insufficient_to_solve": {"pass": true, "note": ""}
+          }
+        },
+        "criterion2_distractors_cannot_solve": {
+          "pass": true,
+          "items": {
+            "no_critical_logic_in_distractor": {"pass": true, "note": ""},
+            "no_integration_example_leaking_golden": {"pass": true, "note": ""}
+          }
+        },
+        "criterion3_specification_compliance": {
+          "pass": true,
+          "items": {
+            "skill_root_only_allowed_files": {"pass": true, "note": ""},
+            "references_cited_and_one_level_deep": {"pass": true, "note": ""}
+          }
+        },
+        "criterion4_spectrum": {
+          "pass": true,
+          "items": {
+            "single_core_capability": {"pass": true, "note": ""},
+            "requires_instruction_following": {"pass": true, "note": ""},
+            "interacts_with_environment": {"pass": true, "note": ""}
+          }
+        }
+      }
+    },
+    "section3_task_quality": {
+      "pass": true,
+      "criteria": {
+        "task_prompt": {
+          "pass": true,
+          "items": {
+            "reads_naturally_as_real_request": {"pass": true, "note": ""},
+            "requires_all_golden_skills": {"pass": true, "note": ""},
+            "input_paths_match_actual_files": {"pass": true, "note": ""}
+          }
+        },
+        "task_structure": {
+          "pass": true,
+          "items": {
+            "setup_uses_approved_packages_only": {"pass": true, "note": ""}
+          }
+        },
+        "technical_hygiene": {
+          "pass": true,
+          "items": {
+            "dates_specified_for_time_sensitive_data": {"pass": true, "note": ""}
+          }
+        }
+      }
+    },
+    "section4_task_diversity": {
+      "pass": true,
+      "criteria": {
+        "prompt_uniqueness": {
+          "pass": true,
+          "items": {
+            "not_generic_template": {"pass": true, "note": ""}
+          }
+        },
+        "domain_diversity": {
+          "pass": true,
+          "items": {
+            "domain_and_category_clear": {"pass": true, "note": ""}
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
-A skill **passes QC** only if every applicable criterion is PASS. Any single FAIL means the skill must be revised before acceptance.
+Set `"pass": false` and provide a specific `"note"` for every item that fails. Set `"overall_pass": false` if any item in any section fails. Add any cross-cutting concerns to `"flags"`.
