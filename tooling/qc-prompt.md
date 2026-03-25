@@ -41,6 +41,7 @@ For **distractors**:
 ### Criterion 2 — Distractors Cannot Solve the Task
 
 For each distractor skill:
+- Could an agent using **only** this distractor (no golden skills) pass `tests/test.py`? If yes, the distractor leaks too much.
 - Does the distractor's `SKILL.md` reproduce any of the golden skill's critical constants, formulas, error strings, or key implementation patterns?
 - Does the distractor contain a section (e.g., "Integration Example", "Relationship to [golden skill]") that effectively reveals the golden skill's logic?
 
@@ -65,7 +66,9 @@ For each golden skill:
 
 - Does `instruction.md` read naturally as a real user request?
 - Does the task require ALL golden skills to solve — not just one?
-- Do input file paths mentioned in `instruction.md` match actual paths inside `input_files/`?
+- Do input file paths mentioned in `instruction.md` match actual paths inside `input_files/`? The prompt must use relative paths (e.g., `input_files/data.csv`), not hardcoded absolute container paths like `/workspace/...` or `/app/...`.
+- Does `instruction.md` mention any golden skill by name? (It must not.)
+- Does `instruction.md` contain excerpts copied from any `SKILL.md`? (It must not.)
 
 ### Task Structure & Environment Compliance
 
@@ -74,6 +77,18 @@ For each golden skill:
 ### Technical Hygiene
 
 - Are dates specified for any time-sensitive data (e.g., "As of Feb 2026")?
+- Do any formal math/science variables use LaTeX notation (e.g., `$\alpha$` not `alpha`)?
+
+### "Surprise" Side Effects (Optional but Highly Encouraged)
+
+*This is advisory — flag whether the task includes surprising side effects, but do not fail the task for lacking them.*
+
+Does the task include one or more surprising side effects that challenge agent problem-solving? Examples:
+- **Silent File Creation**: a tool succeeds but leaves behind a log file that contains actual info needed for the next step
+- **Latency & Dashboards**: a tool starts a process that isn't finished immediately; agent must check a "dashboard" or status file repeatedly
+- **Hidden "Needles"**: a tool returns massive output (e.g., 5,000 lines) where a single surprising error message is buried
+- **Chaos Rate**: a tool works 80% of the time but occasionally returns a "Session Disconnected" error, forcing retry
+- **Stateful Dependencies**: using Flag A and Flag B together causes a surprising result that using either alone would not
 
 ---
 
@@ -117,6 +132,7 @@ Return **only** valid JSON — no markdown, no explanation outside the JSON obje
         "criterion2_distractors_cannot_solve": {
           "pass": true,
           "items": {
+            "distractor_alone_cannot_pass_tests": {"pass": true, "note": ""},
             "no_critical_logic_in_distractor": {"pass": true, "note": ""},
             "no_integration_example_leaking_golden": {"pass": true, "note": ""}
           }
@@ -146,7 +162,9 @@ Return **only** valid JSON — no markdown, no explanation outside the JSON obje
           "items": {
             "reads_naturally_as_real_request": {"pass": true, "note": ""},
             "requires_all_golden_skills": {"pass": true, "note": ""},
-            "input_paths_match_actual_files": {"pass": true, "note": ""}
+            "input_paths_match_actual_files": {"pass": true, "note": ""},
+            "no_golden_skill_names_in_prompt": {"pass": true, "note": ""},
+            "no_skill_md_excerpts_in_prompt": {"pass": true, "note": ""}
           }
         },
         "task_structure": {
@@ -158,8 +176,12 @@ Return **only** valid JSON — no markdown, no explanation outside the JSON obje
         "technical_hygiene": {
           "pass": true,
           "items": {
-            "dates_specified_for_time_sensitive_data": {"pass": true, "note": ""}
+            "dates_specified_for_time_sensitive_data": {"pass": true, "note": ""},
+            "latex_for_math_variables": {"pass": true, "note": ""}
           }
+        },
+        "surprise_side_effects": {
+          "note": "Advisory only — describe any surprising side effects present, or note their absence."
         }
       }
     },
