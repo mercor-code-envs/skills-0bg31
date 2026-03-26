@@ -7,6 +7,7 @@ Exits 0 if all required checks pass, 1 if any errors are found.
 
 Usage:
     Expert format (default — environment/ with Dockerfile + skills/ + setup.sh, task.toml):
+    Expert format (default — environment/ with Dockerfile + skills/ + setup.sh, task.toml):
         python validate_task.py --task-path tasks/my-task
         python validate_task.py --task-name my-task
 
@@ -26,10 +27,22 @@ from collections import Counter
 from pathlib import Path
 
 try:
+    from allowed_packages import PIP_PACKAGES as _PIP_ALLOWED, APT_PACKAGES as _APT_ALLOWED
+except ImportError:
+    _PIP_ALLOWED: set[str] = set()
+    _APT_ALLOWED: set[str] = set()
+
+try:
     import yaml as _yaml
     _YAML_AVAILABLE = True
 except ImportError:
     _YAML_AVAILABLE = False
+
+try:
+    from skills_ref import validate as _skills_ref_validate
+    _SKILLS_REF_AVAILABLE = True
+except ImportError:
+    _SKILLS_REF_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +158,16 @@ def check_metadata(task_dir: Path, task_name: str, delivery: bool = False) -> di
     if meta is None:
         return None
 
-    required = ["task_name", "category", "golden_skills", "distractor_skills", "failure_modes"]
+    required = ["task_name", "category", "golden_skills", "distractor_skills"]
     if delivery:
         required += ["input_files"]
+    _ALLOWED_META_FIELDS = set(required) | {"input_files", "test_file", "solution_file"}
     for field in required:
         if field not in meta:
             error(f"metadata.json missing required field: '{field}'")
+    for field in meta:
+        if field not in _ALLOWED_META_FIELDS:
+            error(f"metadata.json contains unexpected field: '{field}'")
 
     if meta.get("task_name") and meta["task_name"] != task_name:
         error(
@@ -184,27 +201,87 @@ def check_metadata(task_dir: Path, task_name: str, delivery: bool = False) -> di
     if not isinstance(meta.get("input_files", []), list):
         error("metadata.json input_files must be an array")
 
-    # Check failure_modes is present, has required keys, and is properly filled
-    failure_modes = meta.get("failure_modes", {})
-    if not failure_modes:
-        error("metadata.json failure_modes is missing or empty")
-    else:
-        required_fm_keys = ["gemini-3.1-pro-base", "claude-opus-4-6-base", "claude-opus-4-6-with-skills"]
-        for key in required_fm_keys:
-            if key not in failure_modes:
-                error(f"metadata.json failure_modes missing required key: '{key}'")
-        for key, val in failure_modes.items():
-            val_str = json.dumps(val) if isinstance(val, dict) else str(val)
-            if "TODO" in val_str:
-                error(f"metadata.json failure_modes['{key}'] still has TODO — fill in after running evals")
-            elif len(val_str.strip('"')) < 150:
-                error(f"metadata.json failure_modes['{key}'] is too short (minimum 150 characters) — describe what the agent tried and where it got stuck")
-
     return meta
 
 
 _EXPERT_ALLOWED = {"metadata.json", "instruction.md", "tests", "solution", "task.toml", "environment"}
 _DELIVERY_ALLOWED = {"metadata.json", "instruction.md", "setup.sh", "tests", "solution", "input_files", "skills"}
+
+_PACKAGE_INSTALL_RE = re.compile(
+    r'^\s*(?!#)'
+    r'(apt(?:-get)?\s+install|pip3?\s+install|conda\s+install|brew\s+install|npm\s+install|yarn\s+add)'
+    r'([^\n]*)',
+    re.MULTILINE,
+)
+
+_PKG_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+
+
+def _normalize_pkg(name: str) -> str:
+    """Normalize a package name for allowlist comparison (lowercase, _ → -)."""
+    return name.lower().replace('_', '-')
+
+
+def _extract_packages(args_str: str) -> list[str]:
+    """Extract bare package names from the argument string of an install command.
+
+    Strips flags (starting with -), version specifiers ([...], ==, >=, etc.),
+    stops at shell operators (&&, ||, ;, |), and returns only package names.
+    """
+    pkgs = []
+    for token in args_str.split():
+        if token in ('&&', '||', ';', '|', '\\'):
+            break  # stop at shell operators
+        if token.startswith('-'):
+            continue  # skip flags like -y, --no-cache-dir
+        if token.startswith('/'):
+            continue  # skip absolute paths (e.g. /var/lib/apt/lists/*)
+        # Strip extras and version specifiers: pkg[extra]==1.0 → pkg
+        name = re.split(r'[\[=!<>~@]', token)[0]
+        if _PKG_NAME_RE.match(name):
+            pkgs.append(name)
+    return pkgs
+
+
+def _check_no_package_installs(setup_sh: Path, label: str) -> None:
+    """Fail if setup.sh installs packages not in the pre-installed allowlist."""
+    raw = setup_sh.read_text(errors="replace")
+    # Join line continuations so multi-line install commands are a single line
+    text = re.sub(r'\\\n', ' ', raw)
+    # Remove comment lines to avoid false positives
+    text = '\n'.join(
+        line for line in text.splitlines()
+        if not line.lstrip().startswith('#')
+    )
+    for match in _PACKAGE_INSTALL_RE.finditer(text):
+        cmd = match.group(1).strip()
+        args = match.group(2)
+        pkgs = _extract_packages(args)
+
+        # Determine which allowlist to use
+        if cmd.startswith('apt'):
+            allowlist = _APT_ALLOWED
+        elif 'pip' in cmd:
+            allowlist = _PIP_ALLOWED
+        else:
+            # conda, brew, npm, yarn — no allowlist; always flag
+            allowlist = set()
+
+        non_allowed = [p for p in pkgs if _normalize_pkg(p) not in allowlist]
+        if non_allowed or not pkgs:
+            # Flag if any package is not allowlisted, or if we couldn't parse packages
+            # (e.g. -r requirements.txt) assume non-allowed
+            if not pkgs:
+                error(
+                    f"{label} contains a package install command '{cmd}' — "
+                    "all dependencies must be pre-installed in the base image"
+                )
+            else:
+                error(
+                    f"{label} contains a package install command '{cmd}' with "
+                    f"non-allowlisted package(s): {', '.join(non_allowed)} — "
+                    "all dependencies must be pre-installed in the base image"
+                )
 
 
 def check_required_files(task_dir: Path, meta: dict | None, delivery: bool = False) -> None:
@@ -238,12 +315,13 @@ def check_required_files(task_dir: Path, meta: dict | None, delivery: bool = Fal
                 setup_text = setup_sh.read_text(errors="replace")
                 has_oracle_ref = "oracle/" in setup_text or "oracle\\" in setup_text
                 has_oracle_cleanup = (
-                    "rm -rf /workspace/oracle" in setup_text
+                    "rm -rf ../oracle" in setup_text
                     or "rm -rf oracle" in setup_text
                     or "rm -rf ./oracle" in setup_text
                 )
                 if has_oracle_ref and not has_oracle_cleanup:
-                    error("environment/setup.sh references oracle/ but does not remove it — add 'rm -rf /workspace/oracle' after running oracle scripts")
+                    error("environment/setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
+                _check_no_package_installs(setup_sh, "environment/setup.sh")
     else:
         # Delivery format: setup.sh at task root
         setup_sh = task_dir / "setup.sh"
@@ -256,12 +334,60 @@ def check_required_files(task_dir: Path, meta: dict | None, delivery: bool = Fal
             setup_text = setup_sh.read_text(errors="replace")
             has_oracle_ref = "oracle/" in setup_text or "oracle\\" in setup_text
             has_oracle_cleanup = (
-                "rm -rf /workspace/oracle" in setup_text
+                "rm -rf ../oracle" in setup_text
                 or "rm -rf oracle" in setup_text
                 or "rm -rf ./oracle" in setup_text
             )
             if has_oracle_ref and not has_oracle_cleanup:
-                error("setup.sh references oracle/ but does not remove it — add 'rm -rf /workspace/oracle' after running oracle scripts")
+                error("setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
+            _check_no_package_installs(setup_sh, "setup.sh")
+    if not (task_dir / "instruction.md").exists():
+        error("instruction.md is missing")
+
+    if not delivery:
+        # Expert format: setup.sh lives inside environment/ (Docker build context)
+        env_dir = task_dir / "environment"
+        if not env_dir.exists():
+            error("environment/ directory is missing")
+        else:
+            if not (env_dir / "Dockerfile").exists():
+                error("environment/Dockerfile is missing")
+            setup_sh = env_dir / "setup.sh"
+            if not setup_sh.exists():
+                error("environment/setup.sh is missing")
+            else:
+                first_line = setup_sh.read_bytes().split(b"\n", 1)[0].rstrip(b"\r")
+                if first_line != b"#!/bin/bash":
+                    error(f"environment/setup.sh shebang must be '#!/bin/bash', got '{first_line.decode(errors='replace')}'")
+                setup_text = setup_sh.read_text(errors="replace")
+                has_oracle_ref = "oracle/" in setup_text or "oracle\\" in setup_text
+                has_oracle_cleanup = (
+                    "rm -rf ../oracle" in setup_text
+                    or "rm -rf oracle" in setup_text
+                    or "rm -rf ./oracle" in setup_text
+                )
+                if has_oracle_ref and not has_oracle_cleanup:
+                    error("environment/setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
+                _check_no_package_installs(setup_sh, "environment/setup.sh")
+    else:
+        # Delivery format: setup.sh at task root
+        setup_sh = task_dir / "setup.sh"
+        if not setup_sh.exists():
+            error("setup.sh is missing")
+        else:
+            first_line = setup_sh.read_bytes().split(b"\n", 1)[0].rstrip(b"\r")
+            if first_line != b"#!/bin/bash":
+                error(f"setup.sh shebang must be '#!/bin/bash', got '{first_line.decode(errors='replace')}'")
+            setup_text = setup_sh.read_text(errors="replace")
+            has_oracle_ref = "oracle/" in setup_text or "oracle\\" in setup_text
+            has_oracle_cleanup = (
+                "rm -rf ../oracle" in setup_text
+                or "rm -rf oracle" in setup_text
+                or "rm -rf ./oracle" in setup_text
+            )
+            if has_oracle_ref and not has_oracle_cleanup:
+                error("setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
+            _check_no_package_installs(setup_sh, "setup.sh")
 
     test_py = task_dir / "tests" / "test.py"
     if not test_py.exists():
@@ -346,6 +472,8 @@ def _check_test_py(task_dir: Path, test_py: Path, delivery: bool = False) -> Non
 
     # Runnable: pytest must not exit with error code 2+ (import/syntax errors)
     # Exit code 0 = all pass, 1 = some failures (expected), 2+ = collection/import error
+    # Output must contain a pytest summary line like "3 passed, 1 failed in 0.42s"
+    _PYTEST_SUMMARY_RE = re.compile(r'\d+\s+(passed|failed|error)')
     try:
         result = subprocess.run(
             ["python", "-m", "pytest", str(test_py), "--tb=short", "-q", "--no-header"],
@@ -354,11 +482,15 @@ def _check_test_py(task_dir: Path, test_py: Path, delivery: bool = False) -> Non
             timeout=30,
             cwd=task_dir,
         )
+        output = (result.stdout + result.stderr).strip()
         if result.returncode >= 2:
-            # Extract first error line for a compact message
-            output = (result.stdout + result.stderr).strip()
             first_error = next((l for l in output.splitlines() if "ERROR" in l or "error" in l.lower()), output[:200])
             error(f"tests/test.py fails to collect/run via pytest (exit {result.returncode}): {first_error}")
+        elif not _PYTEST_SUMMARY_RE.search(output):
+            error(
+                "tests/test.py did not produce a pytest summary line — "
+                "expected output like '3 passed, 1 failed in 0.42s'"
+            )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass  # Skip if pytest not available or timeout
 
@@ -417,8 +549,8 @@ def check_input_files_exist(task_dir: Path, meta: dict) -> None:
         setup_sh = task_dir / "setup.sh"
         if setup_sh.exists():
             setup_text = setup_sh.read_text(errors="replace")
-            if "rm -rf /workspace/oracle" not in setup_text and "rm -r /workspace/oracle" not in setup_text:
-                error("input_files/oracle/ exists but setup.sh does not remove it — setup.sh must contain 'rm -rf /workspace/oracle'")
+            if "rm -rf ../oracle" not in setup_text and "rm -rf oracle" not in setup_text and "rm -rf ./oracle" not in setup_text:
+                error("input_files/oracle/ exists but setup.sh does not remove it — setup.sh must contain 'rm -rf ../oracle'")
         else:
             error("input_files/oracle/ exists but setup.sh is missing — setup.sh must remove oracle/ after use")
 
@@ -449,6 +581,67 @@ def check_dockerfile(task_dir: Path) -> None:
             "(FROM public.ecr.aws/k4t1e3r5/skill-base:latest, COPY skills /root/.claude/skills, "
             "COPY skills /root/skills, COPY . /, COPY setup.sh, RUN setup.sh)"
         )
+
+
+_SIM_FLOOR = 0.60
+_SIM_CEILING = 0.90
+
+
+def _desc_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z][a-z0-9]{1,}", text.lower())
+
+
+def _cosine_sim(a: list[str], b: list[str]) -> float:
+    ca, cb = Counter(a), Counter(b)
+    common = set(ca) & set(cb)
+    dot = sum(ca[t] * cb[t] for t in common)
+    mag = math.sqrt(sum(v * v for v in ca.values())) * math.sqrt(sum(v * v for v in cb.values()))
+    return dot / mag if mag else 0.0
+
+
+def _get_description(skill_dir: Path) -> str:
+    """Extract the description field value from a skill's SKILL.md frontmatter."""
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        return ""
+    fields = parse_frontmatter(skill_md)
+    return str(fields.get("description", ""))
+
+
+def check_skill_similarity(task_dir: Path, meta: dict, delivery: bool = False) -> None:
+    """For each distractor, its description must score >= 0.60 with at least one golden
+    description, and must not score >= 0.90 with any golden description."""
+    skills_dir = task_dir / "skills" if delivery else task_dir / "environment" / "skills"
+    label = "skills" if delivery else "environment/skills"
+    golden = meta.get("golden_skills", [])
+    distractors = meta.get("distractor_skills", [])
+
+    golden_tokens = {g: _desc_tokens(_get_description(skills_dir / g)) for g in golden}
+
+    for d_name in distractors:
+        d_tokens = _desc_tokens(_get_description(skills_dir / d_name))
+        if not d_tokens:
+            continue
+        sims = {
+            g_name: _cosine_sim(d_tokens, g_tok)
+            for g_name, g_tok in golden_tokens.items()
+            if g_tok
+        }
+        if not sims:
+            continue
+        max_sim_name = max(sims, key=lambda k: sims[k])
+        max_sim = sims[max_sim_name]
+        if max_sim >= _SIM_CEILING:
+            error(
+                f"{label}/{d_name} description is too similar to {label}/{max_sim_name} "
+                f"({max_sim:.2f} >= {_SIM_CEILING}) — distractor may leak golden skill content"
+            )
+        elif max_sim < _SIM_FLOOR:
+            error(
+                f"{label}/{d_name} description has no sufficiently similar golden skill "
+                f"(max score {max_sim:.2f} < {_SIM_FLOOR}) — distractor must score >= {_SIM_FLOOR} "
+                "against at least one golden skill description"
+            )
 
 
 def check_skills(task_dir: Path, meta: dict | None, delivery: bool = False) -> None:
@@ -546,64 +739,6 @@ def _check_python_import_order(script: Path, prefix: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cosine similarity helpers
-# ---------------------------------------------------------------------------
-
-def _skill_tokens(skill_dir: Path) -> list[str]:
-    """Return lowercase word tokens from a SKILL.md (description + body, no code blocks)."""
-    skill_md = skill_dir / "SKILL.md"
-    if not skill_md.exists():
-        return []
-    text = skill_md.read_text(errors="replace")
-    # Strip fenced code blocks to avoid matching on code syntax
-    text = re.sub(r"```[\s\S]*?```", " ", text)
-    return re.findall(r"[a-z][a-z0-9]{1,}", text.lower())
-
-
-def _cosine_sim(a: list[str], b: list[str]) -> float:
-    ca, cb = Counter(a), Counter(b)
-    common = set(ca) & set(cb)
-    dot = sum(ca[t] * cb[t] for t in common)
-    mag = math.sqrt(sum(v * v for v in ca.values())) * math.sqrt(sum(v * v for v in cb.values()))
-    return dot / mag if mag else 0.0
-
-
-_SIMILARITY_MAX_THRESHOLD = 0.85
-_SIMILARITY_MIN_THRESHOLD = 0.60
-
-
-def check_skill_similarity(task_dir: Path, meta: dict, delivery: bool = False) -> None:
-    """Check cosine similarity between each golden↔distractor SKILL.md pair.
-
-    - Too high (>= 0.85): distractor may leak golden skill content.
-    - Too low (< 0.60): distractor is not relevant enough to the golden skill (V3 requires >= 0.60).
-    """
-    skills_dir = task_dir / "skills" if delivery else task_dir / "environment" / "skills"
-    golden = meta.get("golden_skills", [])
-    distractors = meta.get("distractor_skills", [])
-
-    skills_label = "skills" if delivery else "environment/skills"
-    for g_name in golden:
-        g_tokens = _skill_tokens(skills_dir / g_name)
-        if not g_tokens:
-            continue
-        for d_name in distractors:
-            d_tokens = _skill_tokens(skills_dir / d_name)
-            if not d_tokens:
-                continue
-            sim = _cosine_sim(g_tokens, d_tokens)
-            if sim >= _SIMILARITY_MAX_THRESHOLD:
-                warn(
-                    f"{skills_label}/{g_name} and {skills_label}/{d_name} have high cosine similarity "
-                    f"({sim:.2f} >= {_SIMILARITY_MAX_THRESHOLD}) — distractor may leak "
-                    "golden skill content"
-                )
-            elif sim < _SIMILARITY_MIN_THRESHOLD:
-                warn(
-                    f"{skills_label}/{g_name} and {skills_label}/{d_name} have low cosine similarity "
-                    f"({sim:.2f} < {_SIMILARITY_MIN_THRESHOLD}) — distractor must score >= 0.60 "
-                    "to be relevant enough to the golden skill"
-                )
 
 _SKILL_ROOT_ALLOWED = {"SKILL.md", "scripts", "references", "assets"}
 
@@ -617,12 +752,21 @@ def _check_single_skill(skill_dir: Path, skill_name: str, skills_label: str = "s
     else:
         _check_skill_md(skill_md, skill_name, prefix)
 
+    # Run skills-ref library validation
+    if _SKILLS_REF_AVAILABLE:
+        for problem in _skills_ref_validate(skill_dir):
+            error(f"{prefix}: skills-ref: {problem}")
+    else:
+        error(f"{prefix}: skills-ref library is not installed — run: pip install skills-ref")
+
     if (skill_dir / "scripts").exists():
         _check_scripts_syntax(skill_dir / "scripts", prefix)
 
     # Skill root must contain only SKILL.md, scripts/, and optionally references/, assets/
     for item in sorted(skill_dir.iterdir()):
         if item.name.startswith("."):
+            continue
+        if item.name in {"__pycache__"} or item.name.endswith(".pyc"):
             continue
         if item.name not in _SKILL_ROOT_ALLOWED:
             error(
@@ -637,18 +781,104 @@ _INSTRUCTION_FORBIDDEN = [
 ]
 
 
-def check_instruction_md(task_dir: Path) -> None:
-    """Check instruction.md does not reference skills or the skills workspace path."""
+_PATH_RE = re.compile(r'\b([a-zA-Z0-9_.+-]+(?:/[a-zA-Z0-9_.+-]+)+)\b')
+
+
+# Nudge text that must appear verbatim at the very start of instruction.md.
+# {skill_path} is replaced at runtime with an actual path — match any non-whitespace token.
+_NUDGE_RE = re.compile(
+    r'^The documentation and scripts in \S+ are useful for high-level repeated workflows '
+    r'such as common tool usage or calling external APIs, etc that would otherwise be error-prone\. '
+    r'Prioritize using existing scripts when possible and only write custom solutions when truly necessary\.\n'
+    r'\nNever use a script without reading its documentation first\. '
+    r'All subdirectories have a SKILL\.md file with documentation which you must read before '
+    r'using the scripts in such subdirectories\.'
+)
+
+# Anchored version used to detect the nudge elsewhere in the file (not at position 0)
+_NUDGE_BODY_RE = re.compile(
+    r'The documentation and scripts in \S+ are useful for high-level repeated workflows'
+)
+
+
+def check_instruction_md(task_dir: Path, meta: dict | None = None, delivery: bool = False) -> None:
+    """Check instruction.md does not reference skills, forbidden paths, or mismatched input paths."""
     instruction = task_dir / "instruction.md"
     if not instruction.exists():
         return  # already caught by check_required_files
     text = instruction.read_text(errors="replace")
+
+    # Nudge text must appear at the very beginning of instruction.md
+    if not _NUDGE_RE.match(text):
+        error(
+            "instruction.md is missing the required nudge text at the start, or it is not at position 0 — "
+            "instruction.md must begin with: "
+            "'The documentation and scripts in <skill_path> are useful for high-level repeated workflows...'"
+        )
+    else:
+        # Must not appear a second time anywhere else in the file
+        matches = list(_NUDGE_BODY_RE.finditer(text))
+        if len(matches) > 1:
+            error(
+                "instruction.md contains the nudge text more than once — "
+                "it must appear exactly at the beginning and nowhere else"
+            )
+
+    # Forbidden phrases
     for phrase in _INSTRUCTION_FORBIDDEN:
         if phrase in text:
             error(
                 f"instruction.md contains forbidden phrase '{phrase}' — "
                 "task prompt must not reference skill files or the skills workspace"
             )
+
+    # No golden or distractor skill names mentioned
+    if meta:
+        all_skills = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
+        for skill_name in all_skills:
+            if skill_name in text:
+                error(
+                    f"instruction.md mentions skill name '{skill_name}' — "
+                    "task prompt must not reference skill names"
+                )
+
+    # No SKILL.md body excerpts (8-word n-gram match)
+    if meta:
+        skills_dir = task_dir / "skills" if delivery else task_dir / "environment" / "skills"
+        all_skill_names = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
+        skill_ngrams: set[tuple[str, ...]] = set()
+        for skill_name in all_skill_names:
+            skill_md = skills_dir / skill_name / "SKILL.md"
+            if skill_md.exists():
+                raw = skill_md.read_text(errors="replace")
+                # Extract body only (after closing ---)
+                parts = raw.split("---", 2)
+                body = parts[2] if len(parts) >= 3 else raw
+                words = body.lower().split()
+                skill_ngrams |= {tuple(words[i:i+8]) for i in range(len(words) - 7)}
+        if skill_ngrams:
+            inst_words = text.lower().split()
+            inst_ngrams = {tuple(inst_words[i:i+8]) for i in range(len(inst_words) - 7)}
+            if skill_ngrams & inst_ngrams:
+                error("instruction.md contains an excerpt from a SKILL.md body — task prompt must not include skill content")
+
+    # Check: for each declared input_file, if its name appears in instruction.md,
+    # ensure the path used in the instruction matches the declared name exactly.
+    if delivery and meta:
+        declared_inputs = meta.get("input_files", [])
+        declared_set = set(declared_inputs)
+        for fname in declared_inputs:
+            basename = fname.rsplit("/", 1)[-1]
+            if basename in text or fname in text:
+                for match in _PATH_RE.finditer(text):
+                    candidate = match.group(1)
+                    # Flag only if candidate shares the basename but is not declared at all
+                    if candidate.rsplit("/", 1)[-1] == basename and candidate != fname and candidate not in declared_set:
+                        error(
+                            f"instruction.md references '{candidate}' but metadata.json declares "
+                            f"this file as '{fname}' — paths must match"
+                        )
+
 
 
 def _check_skill_md(skill_md: Path, skill_name: str, prefix: str) -> None:
@@ -755,6 +985,9 @@ def validate(task_path: Path, delivery: bool = False) -> bool:
     if not delivery:
         check_dockerfile(task_path)
 
+    if not delivery:
+        check_dockerfile(task_path)
+
     if meta and delivery:
         check_input_files_exist(task_path, meta)
 
@@ -763,7 +996,24 @@ def validate(task_path: Path, delivery: bool = False) -> bool:
     if meta:
         check_skill_similarity(task_path, meta, delivery=delivery)
 
-    check_instruction_md(task_path)
+    check_instruction_md(task_path, meta=meta, delivery=delivery)
+
+    # Check all task files for app/ or workspace/ path references
+    skip_dirs = {".git", "__pycache__", "node_modules"}
+    for fpath in task_path.rglob("*"):
+        if fpath.is_dir() or any(d in fpath.parts for d in skip_dirs):
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        rel = fpath.relative_to(task_path)
+        for match in _PATH_RE.finditer(text):
+            candidate = match.group(1)
+            if candidate.startswith("app/") or candidate.startswith("workspace/"):
+                error(
+                    f"{rel}: references path '{candidate}' — app/ and workspace/ paths are not allowed in any task file"
+                )
 
     print_results(task_name)
     return len(errors) == 0
@@ -783,6 +1033,7 @@ def main() -> None:
             "    python validate_task.py --task-name my-task --delivery\n"
             "\n"
             "Format differences:\n"
+            "  Expert:   Dockerfile + setup.sh + skills/ inside environment/, has task.toml, no input_files/\n"
             "  Expert:   Dockerfile + setup.sh + skills/ inside environment/, has task.toml, no input_files/\n"
             "  Delivery: skills at skills/, has input_files/, no environment/ or task.toml"
         ),

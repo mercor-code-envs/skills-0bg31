@@ -48,7 +48,7 @@ For each distractor skill:
 ### Criterion 3 — Specification Compliance
 
 For each skill (golden and distractor):
-- Does the skill root contain ONLY: `SKILL.md`, `scripts/`, and optionally `references/`, `assets/`? (No extra files or hidden files.)
+- Does the skill root contain ONLY: `SKILL.md`, `scripts/`, and optionally `references/`, `assets/`? (No extra files or hidden files, but DO NOT FLAG PYCACHE)
 - Are all `references/` files properly cited in `SKILL.md`? Are they one level deep only?
 
 ### Criterion 4 — Spectrum-Based Checks
@@ -66,13 +66,15 @@ For each golden skill:
 
 - Does `instruction.md` read naturally as a real user request?
 - Does the task require ALL golden skills to solve — not just one?
-- Do input file paths mentioned in `instruction.md` match actual paths inside `input_files/`? The prompt must use relative paths (e.g., `input_files/data.csv`), not hardcoded absolute container paths like `/workspace/...` or `/app/...`.
+- Does `instruction.md` avoid hardcoded absolute container paths like `/workspace/...` or `/app/...`? Relative references (e.g., `data.vita`, `input_files/data.csv`, or just a filename) are all acceptable. Only fail if the instruction contains a literal `/workspace/` or `/app/` path.
 - Does `instruction.md` mention any golden skill by name? (It must not.)
 - Does `instruction.md` contain excerpts copied from any `SKILL.md`? (It must not.)
 
 ### Task Structure & Environment Compliance
 
 - Does `setup.sh` use only the pre-approved package list (no unauthorized dependencies)?
+- Does `tests/test.py` use pytest format? Running it directly should produce output like `"11 failed, 5 passed, 4 errors in 5.00s"`.
+- Does `python -m pytest tests/test.py` exit with code 0 or 1 only? Exit code 2+ means a collection or import error and must be fixed before the task is accepted.
 
 ### Technical Hygiene
 
@@ -170,7 +172,9 @@ Return **only** valid JSON — no markdown, no explanation outside the JSON obje
         "task_structure": {
           "pass": true,
           "items": {
-            "setup_uses_approved_packages_only": {"pass": true, "note": ""}
+            "setup_uses_approved_packages_only": {"pass": true, "note": ""},
+            "tests_use_pytest_format": {"pass": true, "note": ""},
+            "pytest_exits_0_or_1_no_collection_errors": {"pass": true, "note": ""}
           }
         },
         "technical_hygiene": {
