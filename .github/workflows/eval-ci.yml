@@ -1,0 +1,313 @@
+name: Eval CI
+
+concurrency:
+  group: eval-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["tasks/**"]
+  workflow_dispatch:
+    inputs:
+      task_name:
+        description: "Task name to evaluate"
+        required: false
+        type: string
+
+jobs:
+  eval:
+    name: Run Eval Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      pull-requests: write
+      contents: read
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.S3_AWS_REGION }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET_EVAL }}
+      MODAL_SUBMIT_URL: ${{ secrets.MODAL_EVAL_SUBMIT_URL }}
+      MODAL_STATUS_URL: ${{ secrets.MODAL_EVAL_STATUS_URL }}
+      MODAL_API_KEY: ${{ secrets.MODAL_EVAL_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed task
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.task_name }}" ]; then
+            echo "task=${{ inputs.task_name }}" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            BASE="origin/${{ github.base_ref }}"
+            CHANGED=$(git diff --name-only $BASE...HEAD \
+              | grep '^tasks/' | cut -d'/' -f1-2 | sort -u | head -1)
+            if [ -z "$CHANGED" ]; then
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+            else
+              TASK=$(echo "$CHANGED" | sed 's|tasks/||')
+              echo "task=$TASK" >> $GITHUB_OUTPUT
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Set up Python
+        if: steps.detect.outputs.has_changes == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        if: steps.detect.outputs.has_changes == 'true'
+        run: pip install requests awscli
+
+      # ── Post "pending" comment ──────────────────────────────────────
+      - name: Post pending comment
+        if: steps.detect.outputs.has_changes == 'true' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const taskName = '${{ steps.detect.outputs.task }}';
+            const marker = `<!-- eval-ci-${taskName} -->`;
+            const body = [
+              marker,
+              `## ⏳ Eval CI — \`${taskName}\``,
+              '',
+              'Running 6 eval gates on Modal. This takes ~15-30 min.',
+              '',
+              '| Gate | Required | Status |',
+              '|------|----------|--------|',
+              '| Oracle (solve.sh) | PASS | ⏳ Pending |',
+              '| Opus no-skills (5 runs) | 0/5 pass | ⏳ Pending |',
+              '| Gemini no-skills (3 runs) | 0/3 pass | ⏳ Pending |',
+              '| Opus golden-skills (3 runs) | ≥1/3 pass | ⏳ Pending |',
+              '| Opus distractor-only (3 runs) | 0/3 pass | ⏳ Pending |',
+              '| Gemini all-skills+nudge (5 runs) | 1-4/5 pass | ⏳ Pending |',
+              '',
+              '---',
+              '<sub>Automated by [eval-ci](.github/workflows/eval-ci.yml)</sub>',
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' && c.body.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number, body,
+              });
+            }
+
+      # ── Package + upload to S3 ──────────────────────────────────────
+      - name: Package and upload to S3
+        if: steps.detect.outputs.has_changes == 'true'
+        id: upload
+        run: |
+          TASK="${{ steps.detect.outputs.task }}"
+          TIMESTAMP=$(date +%s)
+          RUN_ID="${{ github.run_id }}"
+          S3_KEY="eval-runs/${TIMESTAMP}-${RUN_ID}/${TASK}.zip"
+
+          cd tasks
+          zip -r "/tmp/${TASK}.zip" "${TASK}/"
+          aws s3 cp "/tmp/${TASK}.zip" "s3://${S3_BUCKET}/${S3_KEY}"
+
+          echo "s3_key=${S3_KEY}" >> $GITHUB_OUTPUT
+
+      # ── Read metadata for skill lists ───────────────────────────────
+      - name: Read metadata
+        if: steps.detect.outputs.has_changes == 'true'
+        id: meta
+        run: |
+          TASK="${{ steps.detect.outputs.task }}"
+          META="tasks/${TASK}/metadata.json"
+          if [ -f "$META" ]; then
+            GOLDEN=$(python3 -c "import json; print(json.dumps(json.load(open('$META')).get('golden_skills',[])))")
+            DISTRACTOR=$(python3 -c "import json; print(json.dumps(json.load(open('$META')).get('distractor_skills',[])))")
+          else
+            GOLDEN="[]"
+            DISTRACTOR="[]"
+          fi
+          echo "golden=${GOLDEN}" >> $GITHUB_OUTPUT
+          echo "distractor=${DISTRACTOR}" >> $GITHUB_OUTPUT
+
+      # ── Submit to Modal (returns instantly) ─────────────────────────
+      - name: Submit eval to Modal
+        if: steps.detect.outputs.has_changes == 'true'
+        id: submit
+        run: |
+          TASK="${{ steps.detect.outputs.task }}"
+          RESPONSE=$(curl -s -X POST "${MODAL_SUBMIT_URL}?api_key=${MODAL_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"s3_bucket\": \"${S3_BUCKET}\",
+              \"s3_key\": \"${{ steps.upload.outputs.s3_key }}\",
+              \"task_name\": \"${TASK}\",
+              \"golden_skill_dirs\": ${{ steps.meta.outputs.golden }},
+              \"distractor_skill_dirs\": ${{ steps.meta.outputs.distractor }}
+            }" --max-time 30)
+
+          echo "Modal response: ${RESPONSE}"
+          JOB_ID=$(echo "${RESPONSE}" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+          echo "job_id=${JOB_ID}" >> $GITHUB_OUTPUT
+          echo "Submitted job: ${JOB_ID}"
+
+      # ── Poll Modal for results ──────────────────────────────────────
+      - name: Poll for results
+        if: steps.detect.outputs.has_changes == 'true'
+        id: poll
+        run: |
+          JOB_ID="${{ steps.submit.outputs.job_id }}"
+          MAX_POLLS=100   # 100 × 30s = 50 min max
+          POLL_INTERVAL=30
+
+          echo "Polling job ${JOB_ID} every ${POLL_INTERVAL}s (max ${MAX_POLLS} polls)..."
+
+          for i in $(seq 1 $MAX_POLLS); do
+            RESULT=$(curl -s "${MODAL_STATUS_URL}?job_id=${JOB_ID}&api_key=${MODAL_API_KEY}" --max-time 15)
+            STATUS=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "error")
+            GATES=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('completed_gates',0))" 2>/dev/null || echo "?")
+            TOTAL=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_gates','?'))" 2>/dev/null || echo "?")
+
+            echo "[Poll ${i}/${MAX_POLLS}] status=${STATUS} gates=${GATES}/${TOTAL}"
+
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+              echo "${RESULT}" > /tmp/eval-results.json
+              EVAL_PASSED=$(echo "${RESULT}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('eval_passed', False))")
+              echo "eval_passed=${EVAL_PASSED}" >> $GITHUB_OUTPUT
+              echo "status=${STATUS}" >> $GITHUB_OUTPUT
+              echo "Eval finished: ${STATUS}"
+              break
+            fi
+
+            if [ $i -eq $MAX_POLLS ]; then
+              echo '{"status":"timeout","eval_passed":false,"error":"Polling timed out after 50 min","gates":{}}' > /tmp/eval-results.json
+              echo "eval_passed=False" >> $GITHUB_OUTPUT
+              echo "status=timeout" >> $GITHUB_OUTPUT
+              echo "::error::Eval polling timed out"
+            fi
+
+            sleep $POLL_INTERVAL
+          done
+
+      # ── Post results comment ────────────────────────────────────────
+      - name: Post results comment
+        if: always() && steps.detect.outputs.has_changes == 'true' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const taskName = '${{ steps.detect.outputs.task }}';
+            const jobId = '${{ steps.submit.outputs.job_id }}';
+            const marker = `<!-- eval-ci-${taskName} -->`;
+
+            let results = {};
+            try {
+              results = JSON.parse(fs.readFileSync('/tmp/eval-results.json', 'utf8'));
+            } catch (e) {
+              results = { eval_passed: false, error: 'No results received', gates: {} };
+            }
+
+            const evalPassed = results.eval_passed === true;
+            const icon = evalPassed ? '✅' : '❌';
+            const status = evalPassed ? 'PASSED' : 'FAILED';
+
+            const gateOrder = [
+              { key: 'oracle',                  label: 'Oracle (solve.sh)',              req: 'PASS' },
+              { key: 'opus_no_skills',          label: 'Opus no-skills (5 runs)',        req: '0/5 pass' },
+              { key: 'gemini_no_skills',        label: 'Gemini no-skills (3 runs)',      req: '0/3 pass' },
+              { key: 'opus_golden_skills',      label: 'Opus golden-skills (3 runs)',    req: '≥1/3 pass' },
+              { key: 'opus_distractor_only',    label: 'Opus distractor-only (3 runs)',  req: '0/3 pass' },
+              { key: 'gemini_all_skills_nudge', label: 'Gemini all-skills+nudge (5 runs)', req: '1-4/5 pass' },
+            ];
+
+            let rows = '';
+            for (const spec of gateOrder) {
+              const g = results.gates?.[spec.key] || {};
+              const gIcon = g.gate_passed === true ? '✅' : (g.gate_passed === false ? '❌' : '⏳');
+              const rate = g.total_runs ? `${g.pass_count}/${g.total_runs}` : 'N/A';
+              rows += `| ${spec.label} | ${spec.req} | ${gIcon} | ${rate} |\n`;
+            }
+
+            let body = `${marker}\n## ${icon} Eval CI ${status} — \`${taskName}\`\n\n`;
+            body += `| Gate | Required | Result | Pass Rate |\n|------|----------|--------|----------|\n${rows}\n`;
+
+            if (results.error) {
+              body += `\n**Error:** ${results.error}\n`;
+            }
+            if (results.duration_sec) {
+              body += `\nDuration: ${Math.round(results.duration_sec / 60)} min | `;
+            }
+            body += `Job: \`${jobId}\`\n`;
+
+            // Per-run details (collapsible)
+            body += '\n<details><summary>Per-run details</summary>\n\n';
+            for (const spec of gateOrder) {
+              const g = results.gates?.[spec.key];
+              if (!g?.runs?.length) continue;
+              body += `### ${spec.label}\n`;
+              for (let i = 0; i < g.runs.length; i++) {
+                const r = g.runs[i];
+                const rIcon = r.passed ? '✅' : '❌';
+                const dur = r.duration ? `${Math.round(r.duration)}s` : '?';
+                const err = r.error ? ` — ${r.error.substring(0, 200)}` : '';
+                body += `- Run ${i+1}: ${rIcon} (${dur})${err}\n`;
+              }
+              body += '\n';
+            }
+            body += '</details>\n\n---\n<sub>Automated by [eval-ci](.github/workflows/eval-ci.yml)</sub>';
+
+            // Upsert comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' && c.body.includes(marker)
+            );
+            const params = { owner: context.repo.owner, repo: context.repo.repo, body };
+            if (existing) {
+              await github.rest.issues.updateComment({ ...params, comment_id: existing.id });
+            } else {
+              await github.rest.issues.createComment({
+                ...params, issue_number: context.payload.pull_request.number,
+              });
+            }
+
+      # ── Cleanup S3 ─────────────────────────────────────────────────
+      - name: Cleanup S3
+        if: always() && steps.upload.outputs.s3_key
+        run: aws s3 rm "s3://${S3_BUCKET}/${{ steps.upload.outputs.s3_key }}" || true
+
+      # ── Block PR if eval failed ─────────────────────────────────────
+      - name: Gate check
+        if: steps.detect.outputs.has_changes == 'true'
+        run: |
+          STATUS="${{ steps.poll.outputs.status }}"
+          PASSED="${{ steps.poll.outputs.eval_passed }}"
+
+          if [ "$STATUS" = "timeout" ]; then
+            echo "::error::Eval timed out — re-run the workflow"
+            exit 1
+          fi
+
+          if [ "$PASSED" != "True" ]; then
+            echo "::error::Eval gates FAILED — task does not meet requirements"
+            exit 1
+          fi
+
+          echo "All eval gates passed"
