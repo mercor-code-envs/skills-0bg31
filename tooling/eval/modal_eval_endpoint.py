@@ -61,20 +61,14 @@ GATE_SPECS: list[dict[str, Any]] = [
     {"name": "oracle", "agent": "oracle", "model": "oracle",
      "runs": 1, "variant": "all_skills_nudge",
      "pass_fn": lambda p, t: p == t},
-    {"name": "opus_no_skills", "agent": "claude-code", "model": "claude-opus-4-6",
-     "runs": 5, "variant": "no_skills",
-     "pass_fn": lambda p, t: p == 0},
     {"name": "gemini_no_skills", "agent": "terminus-2", "model": "gemini/gemini-3.1-pro-preview",
      "runs": 3, "variant": "no_skills",
      "pass_fn": lambda p, t: p == 0},
-    {"name": "opus_golden_skills", "agent": "claude-code", "model": "claude-opus-4-6",
-     "runs": 3, "variant": "golden_only",
-     "pass_fn": lambda p, t: p >= 1},
-    {"name": "opus_distractor_only", "agent": "claude-code", "model": "claude-opus-4-6",
+    {"name": "gemini_distractor_only", "agent": "terminus-2", "model": "gemini/gemini-3.1-pro-preview",
      "runs": 3, "variant": "distractor_only",
      "pass_fn": lambda p, t: p == 0},
     {"name": "gemini_all_skills_nudge", "agent": "terminus-2", "model": "gemini/gemini-3.1-pro-preview",
-     "runs": 5, "variant": "all_skills_nudge",
+     "runs": 5, "variant": "all_skills_nudge", "check_all_golden": True,
      "pass_fn": lambda p, t: 1 <= p <= t - 1},
 ]
 
@@ -118,32 +112,38 @@ def load_job_state(job_id: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Skill path detection + nudge
+# Nudge validation
 # ---------------------------------------------------------------------------
 
+# Must match the canonical nudge required by validate_task.py.
+_NUDGE_RE = re.compile(
+    r'^The documentation and scripts in \S+ are useful for high-level repeated workflows '
+    r'such as common tool usage or calling external APIs, etc that would otherwise be error-prone\. '
+    r'Prioritize using existing scripts when possible and only write custom solutions when truly necessary\.\n'
+    r'\nNever use a script without reading its documentation first\. '
+    r'All subdirectories have a SKILL\.md file with documentation which you must read before '
+    r'using the scripts in such subdirectories\.'
+)
 
-def detect_skills_path_from_dockerfile(task_dir: Path) -> str:
-    dockerfile = task_dir / "environment" / "Dockerfile"
-    if not dockerfile.exists():
-        return "/root/.claude/skills"
-    content = dockerfile.read_text()
-    for line in content.split("\n"):
-        m = re.match(r'^\s*COPY\s+skills\s+(/\S+)', line.strip())
-        if m:
-            return m.group(1)
-    return "/root/.claude/skills"
+# Strips the canonical nudge block from the start of instruction.md (used for no_skills variant).
+_NUDGE_STRIP_RE = re.compile(
+    r'^The documentation and scripts in \S+ are useful for.*?'
+    r'using the scripts in such subdirectories\.\n*',
+    re.DOTALL,
+)
 
 
-def build_nudge(skills_container_path: str) -> str:
-    return (
-        f"## Reference Skills\n\n"
-        f"IMPORTANT: Before doing anything else, run `ls {skills_container_path}/` immediately. "
-        f"Then read every skill file with `cat {skills_container_path}/<skill-name>/SKILL.md`. "
-        f"Do this first, before any other command.\n\n"
-        f"These skill documents contain domain knowledge and techniques that may help you "
-        f"solve this task. Browse all available skills and read any that seem relevant to "
-        f"your approach.\n\n"
-    )
+def check_task_nudge(task_dir: Path) -> None:
+    """Hard-fail if instruction.md does not begin with the required nudge text."""
+    instruction = task_dir / "instruction.md"
+    if not instruction.exists():
+        raise ValueError(f"instruction.md missing in {task_dir.name}")
+    text = instruction.read_text(errors="replace")
+    if not _NUDGE_RE.match(text):
+        raise ValueError(
+            f"Task '{task_dir.name}' instruction.md does not begin with the required nudge. "
+            "Run validate_task.py to diagnose and fix before submitting to eval."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -158,27 +158,12 @@ def find_skills_dir(task_dir: Path) -> Path | None:
     return None
 
 
-def ensure_nudge(task_dir: Path) -> None:
-    instruction_path = task_dir / "instruction.md"
+def strip_nudge(instruction_path: Path) -> None:
+    """Remove the canonical nudge block from instruction.md (for no_skills variant)."""
     if not instruction_path.exists():
         return
     content = instruction_path.read_text()
-    if "Before doing anything else, run" in content and "skills" in content:
-        return
-    skills_path = detect_skills_path_from_dockerfile(task_dir)
-    instruction_path.write_text(build_nudge(skills_path) + content)
-
-
-def strip_skill_references(instruction_path: Path) -> None:
-    if not instruction_path.exists():
-        return
-    content = instruction_path.read_text()
-    if "## Reference Skills" in content:
-        idx = content.index("## Reference Skills")
-        rest = content[idx:]
-        next_section = rest.find("\n## ", 3)
-        content = content[:idx] + (rest[next_section:] if next_section != -1 else "")
-    content = re.sub(r'Your working environment includes a /skills directory\.?\s*\n?\n?', '', content)
+    content = _NUDGE_STRIP_RE.sub("", content, count=1)
     instruction_path.write_text(content.strip() + "\n")
 
 
@@ -192,7 +177,7 @@ def prepare_no_skills(src: Path, dst: Path, **_: Any) -> None:
     skills_dir = find_skills_dir(dst)
     if skills_dir:
         shutil.rmtree(skills_dir)
-    strip_skill_references(dst / "instruction.md")
+    strip_nudge(dst / "instruction.md")
 
 
 def prepare_golden_only(src: Path, dst: Path, *, golden_dirs: list[str], **_: Any) -> None:
@@ -202,7 +187,6 @@ def prepare_golden_only(src: Path, dst: Path, *, golden_dirs: list[str], **_: An
         for d in list(skills_dir.iterdir()):
             if d.is_dir() and d.name not in golden_dirs:
                 shutil.rmtree(d)
-    ensure_nudge(dst)
 
 
 def prepare_distractor_only(src: Path, dst: Path, *, distractor_dirs: list[str], **_: Any) -> None:
@@ -212,12 +196,10 @@ def prepare_distractor_only(src: Path, dst: Path, *, distractor_dirs: list[str],
         for d in list(skills_dir.iterdir()):
             if d.is_dir() and d.name not in distractor_dirs:
                 shutil.rmtree(d)
-    ensure_nudge(dst)
 
 
 def prepare_all_skills_nudge(src: Path, dst: Path, **_: Any) -> None:
     shutil.copytree(src, dst)
-    ensure_nudge(dst)
 
 
 VARIANT_BUILDERS = {
@@ -339,7 +321,19 @@ def harbor_eval(
 # ---------------------------------------------------------------------------
 
 
-def run_gate(gate: dict, staging_dir: Path, task_name: str, jobs_base: Path) -> dict:
+def check_golden_skills_in_trajectory(run_job_dir: Path, golden_dirs: list[str]) -> bool:
+    """Return True if all golden skill names appear in at least one trajectory.json in this run."""
+    for traj_file in run_job_dir.rglob("trajectory.json"):
+        try:
+            text = traj_file.read_text(errors="replace")
+            if all(skill in text for skill in golden_dirs):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def run_gate(gate: dict, staging_dir: Path, task_name: str, jobs_base: Path, golden_dirs: list[str] | None = None) -> dict:
     gate_name = gate["name"]
     n_runs = gate["runs"]
     runs = []
@@ -363,10 +357,21 @@ def run_gate(gate: dict, staging_dir: Path, task_name: str, jobs_base: Path) -> 
     total = len(runs)
     gate_passed = gate["pass_fn"](pass_count, total)
 
+    golden_check_passed = None
+    if gate.get("check_all_golden") and gate_passed and golden_dirs:
+        golden_check_passed = any(
+            check_golden_skills_in_trajectory(jobs_base / r["label"], golden_dirs)
+            for r in runs if r.get("passed")
+        )
+        if not golden_check_passed:
+            log.info(f"[{gate_name}] golden skill usage check FAILED — no successful run used all golden skills")
+            gate_passed = False
+
     log.info(f"[{gate_name}] {pass_count}/{total} — {'PASS' if gate_passed else 'FAIL'}")
     return {
         "gate_name": gate_name, "gate_passed": gate_passed,
         "pass_count": pass_count, "total_runs": total, "runs": runs,
+        "golden_check_passed": golden_check_passed,
     }
 
 
@@ -409,16 +414,18 @@ def _run_eval_core(job_id: str, payload: dict) -> dict:
 
     try:
         task_dir = download_and_unpack(payload["s3_bucket"], payload["s3_key"], workspace)
+        check_task_nudge(task_dir)
         variants = prepare_all_variants(
             task_dir, workspace, task_name,
             payload.get("golden_skill_dirs", []),
             payload.get("distractor_skill_dirs", []),
         )
 
+        golden_dirs = payload.get("golden_skill_dirs", [])
         gate_results = {}
         with ThreadPoolExecutor(max_workers=len(GATE_SPECS)) as ex:
             futs = {
-                ex.submit(run_gate, g, variants[g["variant"]], task_name, jobs_base): g["name"]
+                ex.submit(run_gate, g, variants[g["variant"]], task_name, jobs_base, golden_dirs): g["name"]
                 for g in GATE_SPECS
             }
             for fut in as_completed(futs):
