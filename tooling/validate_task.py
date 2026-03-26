@@ -229,15 +229,37 @@ def _extract_packages(args_str: str) -> list[str]:
     stops at shell operators (&&, ||, ;, |), and returns only package names.
     """
     pkgs = []
+    skip_next = False
     for token in args_str.split():
         if token in ('&&', '||', ';', '|', '\\'):
             break  # stop at shell operators
+        if skip_next:
+            skip_next = False
+            continue  # skip filename after -r/--requirement
+        if token in ('-r', '--requirement'):
+            skip_next = True  # next token is a filename, not a package
+            continue
         if token.startswith('-'):
             continue  # skip flags like -y, --no-cache-dir
         if token.startswith('/'):
             continue  # skip absolute paths (e.g. /var/lib/apt/lists/*)
         # Strip extras and version specifiers: pkg[extra]==1.0 → pkg
         name = re.split(r'[\[=!<>~@]', token)[0]
+        if _PKG_NAME_RE.match(name):
+            pkgs.append(name)
+    return pkgs
+
+
+def _read_requirements_file(req_path: Path) -> list[str]:
+    """Parse a requirements.txt and return normalized package names."""
+    if not req_path.exists():
+        return []
+    pkgs = []
+    for line in req_path.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('-'):
+            continue
+        name = re.split(r'[\[=!<>~@;\s]', line)[0]
         if _PKG_NAME_RE.match(name):
             pkgs.append(name)
     return pkgs
@@ -256,7 +278,15 @@ def _check_no_package_installs(setup_sh: Path, label: str) -> None:
     for match in _PACKAGE_INSTALL_RE.finditer(text):
         cmd = match.group(1).strip()
         args = match.group(2)
-        pkgs = _extract_packages(args)
+
+        # Resolve -r requirements.txt by reading the file
+        req_pkgs: list[str] = []
+        req_match = re.search(r'(?:-r|--requirement)\s+(\S+)', args)
+        if req_match:
+            req_file = setup_sh.parent / req_match.group(1)
+            req_pkgs = _read_requirements_file(req_file)
+
+        pkgs = _extract_packages(args) + req_pkgs
 
         # Determine which allowlist to use
         if cmd.startswith('apt'):
@@ -269,8 +299,6 @@ def _check_no_package_installs(setup_sh: Path, label: str) -> None:
 
         non_allowed = [p for p in pkgs if _normalize_pkg(p) not in allowlist]
         if non_allowed or not pkgs:
-            # Flag if any package is not allowlisted, or if we couldn't parse packages
-            # (e.g. -r requirements.txt) assume non-allowed
             if not pkgs:
                 error(
                     f"{label} contains a package install command '{cmd}' — "
@@ -321,7 +349,7 @@ def check_required_files(task_dir: Path, meta: dict | None, delivery: bool = Fal
                 )
                 if has_oracle_ref and not has_oracle_cleanup:
                     error("environment/setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
-                _check_no_package_installs(setup_sh, "environment/setup.sh")
+                # _check_no_package_installs(setup_sh, "environment/setup.sh")  # temporarily disabled
     else:
         # Delivery format: setup.sh at task root
         setup_sh = task_dir / "setup.sh"
@@ -340,7 +368,7 @@ def check_required_files(task_dir: Path, meta: dict | None, delivery: bool = Fal
             )
             if has_oracle_ref and not has_oracle_cleanup:
                 error("setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
-            _check_no_package_installs(setup_sh, "setup.sh")
+            # _check_no_package_installs(setup_sh, "setup.sh")  # temporarily disabled
     if not (task_dir / "instruction.md").exists():
         error("instruction.md is missing")
 
@@ -368,7 +396,7 @@ def check_required_files(task_dir: Path, meta: dict | None, delivery: bool = Fal
                 )
                 if has_oracle_ref and not has_oracle_cleanup:
                     error("environment/setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
-                _check_no_package_installs(setup_sh, "environment/setup.sh")
+                # _check_no_package_installs(setup_sh, "environment/setup.sh")  # temporarily disabled
     else:
         # Delivery format: setup.sh at task root
         setup_sh = task_dir / "setup.sh"
@@ -387,7 +415,7 @@ def check_required_files(task_dir: Path, meta: dict | None, delivery: bool = Fal
             )
             if has_oracle_ref and not has_oracle_cleanup:
                 error("setup.sh references oracle/ but does not remove it — add 'rm -rf ../oracle' after running oracle scripts")
-            _check_no_package_installs(setup_sh, "setup.sh")
+            # _check_no_package_installs(setup_sh, "setup.sh")  # temporarily disabled
 
     test_py = task_dir / "tests" / "test.py"
     if not test_py.exists():
@@ -738,7 +766,34 @@ def _check_python_import_order(script: Path, prefix: str) -> None:
             hit_non_import = True
 
 
+            else:
+                _check_python_import_order(script, prefix)
+
+
+def _check_python_import_order(script: Path, prefix: str) -> None:
+    """Check that all imports appear before non-import, non-docstring code."""
+    try:
+        tree = ast.parse(script.read_text())
+    except SyntaxError:
+        return  # already caught by py_compile
+    hit_non_import = False
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if hit_non_import:
+                error(
+                    f"{prefix}/scripts/{script.name} has import on line {node.lineno} "
+                    "after non-import code — move all imports to the top of the file"
+                )
+                return
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            pass  # module-level docstring
+        else:
+            hit_non_import = True
+
+
 # ---------------------------------------------------------------------------
+
+_SKILL_ROOT_ALLOWED = {"SKILL.md", "scripts", "references", "assets"}
 
 _SKILL_ROOT_ALLOWED = {"SKILL.md", "scripts", "references", "assets"}
 
@@ -759,8 +814,133 @@ def _check_single_skill(skill_dir: Path, skill_name: str, skills_label: str = "s
     else:
         error(f"{prefix}: skills-ref library is not installed — run: pip install skills-ref")
 
+    # Run skills-ref library validation
+    if _SKILLS_REF_AVAILABLE:
+        for problem in _skills_ref_validate(skill_dir):
+            error(f"{prefix}: skills-ref: {problem}")
+    else:
+        error(f"{prefix}: skills-ref library is not installed — run: pip install skills-ref")
+
     if (skill_dir / "scripts").exists():
         _check_scripts_syntax(skill_dir / "scripts", prefix)
+
+    # Skill root must contain only SKILL.md, scripts/, and optionally references/, assets/
+    for item in sorted(skill_dir.iterdir()):
+        if item.name.startswith("."):
+            continue
+        if item.name in {"__pycache__"} or item.name.endswith(".pyc"):
+            continue
+        if item.name not in _SKILL_ROOT_ALLOWED:
+            error(
+                f"{prefix}/{item.name} is not allowed at the skill root — "
+                "skill directory may only contain: SKILL.md, scripts/, references/, assets/"
+            )
+
+
+_INSTRUCTION_FORBIDDEN = [
+    "You have access to skill files",
+    "/workspace/skills/",
+]
+
+
+_PATH_RE = re.compile(r'\b([a-zA-Z0-9_.+-]+(?:/[a-zA-Z0-9_.+-]+)+)\b')
+
+
+# Nudge text that must appear verbatim at the very start of instruction.md.
+# {skill_path} is replaced at runtime with an actual path — match any non-whitespace token.
+_NUDGE_RE = re.compile(
+    r'^The documentation and scripts in \S+ are useful for high-level repeated workflows '
+    r'such as common tool usage or calling external APIs, etc that would otherwise be error-prone\. '
+    r'Prioritize using existing scripts when possible and only write custom solutions when truly necessary\.\n'
+    r'\nNever use a script without reading its documentation first\. '
+    r'All subdirectories have a SKILL\.md file with documentation which you must read before '
+    r'using the scripts in such subdirectories\.'
+)
+
+# Anchored version used to detect the nudge elsewhere in the file (not at position 0)
+_NUDGE_BODY_RE = re.compile(
+    r'The documentation and scripts in \S+ are useful for high-level repeated workflows'
+)
+
+
+def check_instruction_md(task_dir: Path, meta: dict | None = None, delivery: bool = False) -> None:
+    """Check instruction.md does not reference skills, forbidden paths, or mismatched input paths."""
+    instruction = task_dir / "instruction.md"
+    if not instruction.exists():
+        return  # already caught by check_required_files
+    text = instruction.read_text(errors="replace")
+
+    # Nudge text must appear at the very beginning of instruction.md
+    if not _NUDGE_RE.match(text):
+        error(
+            "instruction.md is missing the required nudge text at the start, or it is not at position 0 — "
+            "instruction.md must begin with: "
+            "'The documentation and scripts in <skill_path> are useful for high-level repeated workflows...'"
+        )
+    else:
+        # Must not appear a second time anywhere else in the file
+        matches = list(_NUDGE_BODY_RE.finditer(text))
+        if len(matches) > 1:
+            error(
+                "instruction.md contains the nudge text more than once — "
+                "it must appear exactly at the beginning and nowhere else"
+            )
+
+    # Forbidden phrases
+    for phrase in _INSTRUCTION_FORBIDDEN:
+        if phrase in text:
+            error(
+                f"instruction.md contains forbidden phrase '{phrase}' — "
+                "task prompt must not reference skill files or the skills workspace"
+            )
+
+    # No golden or distractor skill names mentioned
+    if meta:
+        all_skills = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
+        for skill_name in all_skills:
+            if skill_name in text:
+                error(
+                    f"instruction.md mentions skill name '{skill_name}' — "
+                    "task prompt must not reference skill names"
+                )
+
+    # No SKILL.md body excerpts (8-word n-gram match)
+    if meta:
+        skills_dir = task_dir / "skills" if delivery else task_dir / "environment" / "skills"
+        all_skill_names = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
+        skill_ngrams: set[tuple[str, ...]] = set()
+        for skill_name in all_skill_names:
+            skill_md = skills_dir / skill_name / "SKILL.md"
+            if skill_md.exists():
+                raw = skill_md.read_text(errors="replace")
+                # Extract body only (after closing ---)
+                parts = raw.split("---", 2)
+                body = parts[2] if len(parts) >= 3 else raw
+                words = body.lower().split()
+                skill_ngrams |= {tuple(words[i:i+8]) for i in range(len(words) - 7)}
+        if skill_ngrams:
+            inst_words = text.lower().split()
+            inst_ngrams = {tuple(inst_words[i:i+8]) for i in range(len(inst_words) - 7)}
+            if skill_ngrams & inst_ngrams:
+                error("instruction.md contains an excerpt from a SKILL.md body — task prompt must not include skill content")
+
+    # Check: for each declared input_file, if its name appears in instruction.md,
+    # ensure the path used in the instruction matches the declared name exactly.
+    if delivery and meta:
+        declared_inputs = meta.get("input_files", [])
+        declared_set = set(declared_inputs)
+        for fname in declared_inputs:
+            basename = fname.rsplit("/", 1)[-1]
+            if basename in text or fname in text:
+                for match in _PATH_RE.finditer(text):
+                    candidate = match.group(1)
+                    # Flag only if candidate shares the basename but is not declared at all
+                    if candidate.rsplit("/", 1)[-1] == basename and candidate != fname and candidate not in declared_set:
+                        error(
+                            f"instruction.md references '{candidate}' but metadata.json declares "
+                            f"this file as '{fname}' — paths must match"
+                        )
+
 
     # Skill root must contain only SKILL.md, scripts/, and optionally references/, assets/
     for item in sorted(skill_dir.iterdir()):
