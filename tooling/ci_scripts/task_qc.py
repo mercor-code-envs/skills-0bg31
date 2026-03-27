@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """QC validation for Skills tasks — V3.
 
-1. Runs validate_task.py (Section 1: scripted checks)
-2. Packages the task directory as a zip archive
-3. Uploads to S3 temporary storage
-4. Triggers the LLMaaJ QC validation API (Sections 2-4)
-5. Polls for results
-6. Writes a single GitHub comment markdown file (qc-comment.md) with the
+1. Packages the task directory as a zip archive
+2. Uploads to S3 temporary storage
+3. Triggers the LLMaaJ QC validation API (Sections 2-4)
+4. Polls for results
+5. Writes a single GitHub comment markdown file (qc-comment.md) with the
    full V3 checklist filled out — pass/fail per item
 """
 
@@ -24,56 +23,12 @@ QC_API_URL = os.environ.get("VALIDATION_API_URL")
 S3_BUCKET = os.environ.get("S3_BUCKET_TEMP")
 
 _PROMPT_PATH = Path(__file__).parent.parent / "qc-prompt.md"
-_VALIDATE_TASK_PATH = Path(__file__).parent.parent / "validate_task.py"
 
 MAX_POLL_TIME = 800
 POLL_INTERVAL = 10
 
-P = "✅"
-F = "❌"
-NA = "⚪"
-
-
-# ---------------------------------------------------------------------------
-# Section 1: run validate_task.py
-# ---------------------------------------------------------------------------
-
-def run_validate_task(task_dir: Path, task_name: str) -> tuple[bool, list[str], list[str]]:
-    """Run validate_task.py and return (passed, errors, warnings)."""
-    if not _VALIDATE_TASK_PATH.exists():
-        return True, [], ["validate_task.py not found — scripted checks skipped"]
-
-    result = subprocess.run(
-        ["python", str(_VALIDATE_TASK_PATH), "--task-path", str(task_dir), "--delivery"],
-        capture_output=True,
-        text=True,
-    )
-    passed = result.returncode == 0
-    output = result.stdout + result.stderr
-
-    errs: list[str] = []
-    warns: list[str] = []
-    section = None
-    for line in output.splitlines():
-        if line.startswith("Errors:"):
-            section = "errors"
-            continue
-        if line.startswith("Warnings:"):
-            section = "warnings"
-            continue
-        if line.startswith("All checks passed"):
-            section = None
-            continue
-        m = line.strip()
-        if m.startswith("- "):
-            m = m[2:]
-        if m and section == "errors":
-            errs.append(m)
-        elif m and section == "warnings":
-            warns.append(m)
-
-    return passed, errs, warns
-
+PASS = "PASS"
+FAIL = "FAIL"
 
 # ---------------------------------------------------------------------------
 # Packaging + S3
@@ -211,32 +166,17 @@ def parse_llmaaj_result(result: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def _item_line(label: str, passed: bool | None, note: str = "") -> str:
-    icon = P if passed else (F if passed is False else NA)
-    line = f"- {icon} {label}"
+    check = "x" if passed else " "
+    line = f"- [{check}] {label}"
     if note and not passed:
         line += f" — *{note}*"
     return line
 
 
 def _section_header(title: str, passed: bool | None) -> str:
-    icon = P if passed else (F if passed is False else NA)
-    return f"### {icon} {title}"
+    result = PASS if passed else (FAIL if passed is False else "N/A")
+    return f"### {title} — {result}"
 
-
-def render_section1(s1_passed: bool, s1_errors: list[str], s1_warnings: list[str]) -> list[str]:
-    icon = P if s1_passed else F
-    lines = [f"### {icon} Section 1 — Automated Scripted Checks", ""]
-    if s1_passed and not s1_warnings:
-        lines.append(f"{P} All scripted checks passed.")
-    else:
-        if s1_errors:
-            for e in s1_errors:
-                lines.append(f"- {F} {e}")
-        if s1_warnings:
-            for w in s1_warnings:
-                lines.append(f"- ⚠️ {w}")
-    lines.append("")
-    return lines
 
 
 def render_llmaaj_sections(qc: dict) -> list[str]:
@@ -249,43 +189,19 @@ def render_llmaaj_sections(qc: dict) -> list[str]:
     lines.append("")
     criteria = s2.get("criteria", {})
 
-    c1 = criteria.get("criterion1_necessity_sufficiency", {})
-    lines.append(f"**{'✅' if c1.get('pass') else '❌'} Criterion 1 — Skills Necessity & Sufficiency**")
-    for key, label in [
-        ("task_unsolvable_without_golden", "Task is unsolvable by models without golden skills"),
-        ("golden_skills_sufficient_to_solve", "Golden skills are sufficient to solve the task"),
-        ("all_golden_skills_required", "All golden skills are required (none redundant)"),
-        ("distractors_insufficient_to_solve", "Distractor skills are insufficient to solve the task"),
-    ]:
-        item = c1.get("items", {}).get(key, {})
-        lines.append(_item_line(label, item.get("pass"), item.get("note", "")))
-    lines.append("")
-
     c2 = criteria.get("criterion2_distractors_cannot_solve", {})
-    lines.append(f"**{'✅' if c2.get('pass') else '❌'} Criterion 2 — Distractors Cannot Solve the Task**")
+    lines.append(f"**Criterion 2 — Distractors Cannot Solve the Task — {'PASS' if c2.get('pass') else 'FAIL'}**")
     for key, label in [
         ("no_critical_logic_in_distractor", "No critical golden logic reproduced in any distractor"),
-        ("no_integration_example_leaking_golden", "No integration example / relationship section leaking golden logic"),
     ]:
         item = c2.get("items", {}).get(key, {})
         lines.append(_item_line(label, item.get("pass"), item.get("note", "")))
     lines.append("")
 
-    c3 = criteria.get("criterion3_specification_compliance", {})
-    lines.append(f"**{'✅' if c3.get('pass') else '❌'} Criterion 3 — Specification Compliance**")
-    for key, label in [
-        ("skill_root_only_allowed_files", "Skill root contains only SKILL.md, scripts/, references/, assets/"),
-        ("references_cited_and_one_level_deep", "All references/ files cited in SKILL.md and one level deep"),
-    ]:
-        item = c3.get("items", {}).get(key, {})
-        lines.append(_item_line(label, item.get("pass"), item.get("note", "")))
-    lines.append("")
-
     c4 = criteria.get("criterion4_spectrum", {})
-    lines.append(f"**{'✅' if c4.get('pass') else '❌'} Criterion 4 — Spectrum-Based Checks**")
+    lines.append(f"**Criterion 4 — Spectrum-Based Checks — {'PASS' if c4.get('pass') else 'FAIL'}**")
     for key, label in [
         ("single_core_capability", "Skill prioritizes one core capability"),
-        ("requires_instruction_following", "Skill cannot be guessed from LLM pre-training; requires instruction-following"),
         ("interacts_with_environment", "Skill interacts with the environment (files, databases, configs)"),
     ]:
         item = c4.get("items", {}).get(key, {})
@@ -299,44 +215,25 @@ def render_llmaaj_sections(qc: dict) -> list[str]:
     s3_criteria = s3.get("criteria", {})
 
     tp = s3_criteria.get("task_prompt", {})
-    lines.append(f"**{'✅' if tp.get('pass') else '❌'} Task Prompt**")
+    lines.append(f"**Task Prompt — {'PASS' if tp.get('pass') else 'FAIL'}**")
     for key, label in [
         ("reads_naturally_as_real_request", "Task reads naturally as a real user request"),
-        ("requires_all_golden_skills", "Task requires ALL golden skills to solve"),
         ("input_paths_match_actual_files", "Input file paths in prompt match actual input_files/"),
+        ("no_golden_skill_names_in_prompt", "Task prompt does not mention any golden skill by name"),
+        ("no_skill_md_excerpts_in_prompt", "Task prompt contains no excerpts from any SKILL.md"),
     ]:
         item = tp.get("items", {}).get(key, {})
         lines.append(_item_line(label, item.get("pass"), item.get("note", "")))
     lines.append("")
 
-    ts = s3_criteria.get("task_structure", {})
-    lines.append(f"**{'✅' if ts.get('pass') else '❌'} Task Structure & Environment Compliance**")
-    item = ts.get("items", {}).get("setup_uses_approved_packages_only", {})
-    lines.append(_item_line("setup.sh uses only pre-approved packages", item.get("pass"), item.get("note", "")))
-    lines.append("")
-
     th = s3_criteria.get("technical_hygiene", {})
-    lines.append(f"**{'✅' if th.get('pass') else '❌'} Technical Hygiene**")
-    item = th.get("items", {}).get("dates_specified_for_time_sensitive_data", {})
-    lines.append(_item_line("Dates specified for any time-sensitive data", item.get("pass"), item.get("note", "")))
-    lines.append("")
-
-    # ---- Section 4 ----
-    s4 = sections.get("section4_task_diversity", {})
-    lines.append(_section_header("Section 4 — Task Diversity", s4.get("pass")))
-    lines.append("")
-    s4_criteria = s4.get("criteria", {})
-
-    pu = s4_criteria.get("prompt_uniqueness", {})
-    lines.append(f"**{'✅' if pu.get('pass') else '❌'} Task Prompt Uniqueness**")
-    item = pu.get("items", {}).get("not_generic_template", {})
-    lines.append(_item_line("Task prompt is not a generic fill-in-the-blank template", item.get("pass"), item.get("note", "")))
-    lines.append("")
-
-    dd = s4_criteria.get("domain_diversity", {})
-    lines.append(f"**{'✅' if dd.get('pass') else '❌'} Domain & Category Diversity**")
-    item = dd.get("items", {}).get("domain_and_category_clear", {})
-    lines.append(_item_line("Domain and category are clearly stated and distinct", item.get("pass"), item.get("note", "")))
+    lines.append(f"**Technical Hygiene — {'PASS' if th.get('pass') else 'FAIL'}**")
+    for key, label in [
+        ("dates_specified_for_time_sensitive_data", "Dates specified for any time-sensitive data"),
+        ("latex_for_math_variables", "Formal math/science variables use LaTeX notation"),
+    ]:
+        item = th.get("items", {}).get(key, {})
+        lines.append(_item_line(label, item.get("pass"), item.get("note", "")))
     lines.append("")
 
     return lines
@@ -344,45 +241,35 @@ def render_llmaaj_sections(qc: dict) -> list[str]:
 
 def format_comment(
     task_name: str,
-    s1_passed: bool,
-    s1_errors: list[str],
-    s1_warnings: list[str],
     qc: dict | None,
     run_id: str,
 ) -> str:
-    overall = s1_passed and (qc is None or qc.get("overall_pass", False))
-    status_icon = P if overall else F
+    overall = qc is not None and qc.get("overall_pass", False)
     status_word = "PASSED" if overall else "FAILED"
 
     lines = [
         f"<!-- skills-qc-{task_name} -->",
         f"<!-- validation-run-id: {run_id} -->",
-        f"## {status_icon} Skills QC — {status_word}",
+        f"## Skills QC — {status_word}",
         "",
         f"**Task:** `{task_name}`",
         "",
     ]
 
-    # Section 1 (scripted)
-    lines += render_section1(s1_passed, s1_errors, s1_warnings)
-
     if qc is not None:
-        # Sections 2–4 (LLMaaJ)
         lines += render_llmaaj_sections(qc)
 
-        # Summary
         if qc.get("summary"):
             lines += ["---", "### Summary", "", qc["summary"], ""]
 
-        # Flags
         if qc.get("flags"):
-            lines += ["### ⚠️ Flags", ""]
+            lines += ["### Flags", ""]
             for flag in qc["flags"]:
                 lines.append(f"- {flag}")
             lines.append("")
     else:
         lines += [
-            "### ⚪ Sections 2–4 — LLMaaJ Checks",
+            "### Sections 2-3 — LLMaaJ Checks",
             "",
             "*LLMaaJ evaluation unavailable — API did not return structured results.*",
             "",
@@ -425,18 +312,12 @@ def main() -> None:
         print(f"Task directory not found: {task_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Section 1: scripted validation ---
-    print("Running validate_task.py (Section 1)...")
-    s1_passed, s1_errors, s1_warnings = run_validate_task(task_dir, args.task_name)
-    print(f"Section 1: {'PASS' if s1_passed else 'FAIL'} ({len(s1_errors)} errors, {len(s1_warnings)} warnings)")
-
     archive_path = None
     s3_url = None
     qc = None
     run_id = "n/a"
 
     try:
-        # --- Sections 2-4: LLMaaJ ---
         archive_path = package_task(task_dir, args.task_name)
         s3_url = upload_to_s3(archive_path, args.task_name)
         run_id = trigger_validation(s3_url, api_key)
@@ -457,14 +338,12 @@ def main() -> None:
             archive_path.unlink()
 
     # --- Write unified comment ---
-    comment = format_comment(args.task_name, s1_passed, s1_errors, s1_warnings, qc, run_id)
+    comment = format_comment(args.task_name, qc, run_id)
     with open("qc-comment.md", "w") as f:
         f.write(comment)
     print("Saved: qc-comment.md")
 
-    # Fail if any section failed
-    llmaaj_passed = qc is not None and qc.get("overall_pass", False)
-    if not s1_passed or not llmaaj_passed:
+    if qc is None or not qc.get("overall_pass", False):
         print("QC validation failed — see qc-comment.md for details", file=sys.stderr)
         sys.exit(1)
 

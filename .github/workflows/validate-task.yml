@@ -1,9 +1,5 @@
 name: Validate Task
 
-concurrency:
-    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-    cancel-in-progress: true
-
 on:
     pull_request:
         branches:
@@ -62,29 +58,22 @@ jobs:
 
             - name: Install dependencies
               if: steps.detect.outputs.has_changes == 'true'
-              run: pip install requests pyyaml
-
-            - name: Configure AWS credentials
-              if: steps.detect.outputs.has_changes == 'true'
-              uses: aws-actions/configure-aws-credentials@v4
-              with:
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  aws-region: us-east-1
-
-            - name: Run Skills QC
-              id: qc
-              if: steps.detect.outputs.has_changes == 'true'
-              continue-on-error: true
               env:
-                  QC_API_KEY: ${{ secrets.QC_API_KEY }}
-                  VALIDATION_API_URL: ${{ secrets.VALIDATION_API_URL }}
-                  S3_BUCKET_TEMP: ${{ secrets.S3_BUCKET_TEMP }}
-                  GITHUB_WRITER: ${{ secrets.GITHUB_WRITER }}
+                  GH_TOKEN: ${{ secrets.GITHUB_WRITER }}
               run: |
-                  python tooling/ci_scripts/task_qc.py \
-                    --task-name "${{ steps.detect.outputs.task }}"
-                  echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+                  pip install requests pyyaml pytest
+                  pip install "skills-ref @ git+https://${GH_TOKEN}@github.com/agentskills/agentskills.git#subdirectory=skills-ref"
+
+            - name: Run validate_task
+              id: validate
+              if: steps.detect.outputs.has_changes == 'true'
+              run: |
+                  set +e
+                  python tooling/validate_task.py \
+                    --task-name "${{ steps.detect.outputs.task }}" \
+                    2>&1 | tee /tmp/validate-output.txt
+                  EXIT_CODE=${PIPESTATUS[0]}
+                  echo "exit_code=${EXIT_CODE}" >> $GITHUB_OUTPUT
 
             - name: Post PR comment
               if: always() && github.event_name == 'pull_request' && steps.detect.outputs.has_changes == 'true'
@@ -93,14 +82,19 @@ jobs:
                   script: |
                       const fs = require('fs');
                       const taskName = '${{ steps.detect.outputs.task }}';
-                      const marker = `<!-- skills-qc-${taskName} -->`;
+                      const marker = `<!-- skills-validate-${taskName} -->`;
+                      const exitCode = '${{ steps.validate.outputs.exit_code }}';
+                      const passed = exitCode === '0';
+                      const icon = passed ? '✅' : '❌';
+                      const status = passed ? 'PASSED' : 'FAILED';
 
-                      let body;
-                      if (fs.existsSync('qc-comment.md')) {
-                        body = fs.readFileSync('qc-comment.md', 'utf8');
-                      } else {
-                        body = marker + '\n## ❌ Skills QC — FAILED\n\n**Task:** `' + taskName + '`\n\nQC script did not produce output. Check workflow logs.\n\n---\n<sub>Automated by [validate-task](.github/workflows/validate-task.yml)</sub>';
+                      let details = '';
+                      if (fs.existsSync('/tmp/validate-output.txt')) {
+                        const raw = fs.readFileSync('/tmp/validate-output.txt', 'utf8').trim();
+                        if (raw) details = `\n\`\`\`\n${raw}\n\`\`\`\n`;
                       }
+
+                      const body = `${marker}\n## ${icon} Validate Task — ${status} — \`${taskName}\`\n${details}\n---\n<sub>Automated by [validate-task](.github/workflows/validate-task.yml)</sub>`;
 
                       const { data: comments } = await github.rest.issues.listComments({
                         owner: context.repo.owner,
@@ -130,8 +124,8 @@ jobs:
                         });
                       }
 
-            - name: Fail if QC did not pass
-              if: steps.detect.outputs.has_changes == 'true' && steps.qc.outputs.exit_code != '0'
+            - name: Fail if validation did not pass
+              if: steps.detect.outputs.has_changes == 'true' && steps.validate.outputs.exit_code != '0'
               run: |
-                  echo "Skills QC failed — see PR comment for details"
+                  echo "validate_task.py failed — fix issues before merging"
                   exit 1

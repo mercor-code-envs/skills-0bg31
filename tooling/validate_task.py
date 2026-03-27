@@ -158,9 +158,7 @@ def check_metadata(task_dir: Path, task_name: str, delivery: bool = False) -> di
     if meta is None:
         return None
 
-    required = ["task_name", "category", "golden_skills", "distractor_skills"]
-    if delivery:
-        required += ["input_files"]
+    required = ["task_name", "category", "golden_skills", "distractor_skills", "input_files"]
     _ALLOWED_META_FIELDS = set(required) | {"input_files", "test_file", "solution_file"}
     for field in required:
         if field not in meta:
@@ -515,9 +513,10 @@ def _check_test_py(task_dir: Path, test_py: Path, delivery: bool = False) -> Non
             first_error = next((l for l in output.splitlines() if "ERROR" in l or "error" in l.lower()), output[:200])
             error(f"tests/test.py fails to collect/run via pytest (exit {result.returncode}): {first_error}")
         elif not _PYTEST_SUMMARY_RE.search(output):
+            truncated = output[:500] if len(output) > 500 else output
             error(
                 "tests/test.py did not produce a pytest summary line — "
-                "expected output like '3 passed, 1 failed in 0.42s'"
+                f"expected output like '3 passed, 1 failed in 0.42s' but got:\n{truncated}"
             )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass  # Skip if pytest not available or timeout
@@ -582,6 +581,46 @@ def check_input_files_exist(task_dir: Path, meta: dict) -> None:
         else:
             error("input_files/oracle/ exists but setup.sh is missing — setup.sh must remove oracle/ after use")
 
+
+
+_EXPERT_ENV_SKIP = {"Dockerfile", "setup.sh", "skills", "oracle"}
+# Directories prefixed with _ are oracle/internal scaffolding (e.g. _bin/) — not agent-visible input files
+_EXPERT_ENV_SKIP_PREFIX = "_"
+
+
+def check_expert_input_files(task_dir: Path, meta: dict) -> None:
+    """Bidirectional check for expert format: declared input_files ↔ environment/ (minus Dockerfile, setup.sh, skills/).
+
+    1. Every file declared in metadata.json input_files must exist under environment/.
+    2. Every top-level entry in environment/ (excluding Dockerfile, setup.sh, skills/) must be declared.
+    """
+    env_dir = task_dir / "environment"
+    if not env_dir.exists():
+        return  # Dockerfile check will already catch this
+
+    declared = set(meta.get("input_files", []))
+    if not declared:
+        return
+
+    # Direction 1: declared → disk (must exist under environment/)
+    for fname in sorted(declared):
+        if not (env_dir / fname).exists():
+            error(f"metadata.json input_files entry '{fname}' not found in environment/")
+
+    # Direction 2: disk → declared (top-level entries in environment/, skipping infra files)
+    on_disk = {
+        p.name for p in env_dir.iterdir()
+        if not p.name.startswith(".")
+        and p.name not in _EXPERT_ENV_SKIP
+        and not p.name.startswith(_EXPERT_ENV_SKIP_PREFIX)
+    }
+    undeclared = {
+        name for name in on_disk
+        if name not in declared
+        and not any(d == name or d.startswith(name + "/") for d in declared)
+    }
+    for fname in sorted(undeclared):
+        error(f"environment/{fname}/ exists on disk but is not listed in metadata.json input_files")
 
 
 # Expected Dockerfile content for expert format tasks
@@ -684,12 +723,10 @@ def check_skills(task_dir: Path, meta: dict | None, delivery: bool = False) -> N
         error(f"{skills_label}/ directory is missing")
         return
 
-    all_declared = []
-    if meta:
-        all_declared = (
-            list(meta.get("golden_skills", [])) +
-            list(meta.get("distractor_skills", []))
-        )
+    all_declared = (
+        list(meta.get("golden_skills", [])) +
+        list(meta.get("distractor_skills", []))
+    ) if meta else []
 
     # All declared skills must exist
     for skill_name in all_declared:
@@ -701,7 +738,7 @@ def check_skills(task_dir: Path, meta: dict | None, delivery: bool = False) -> N
     for skill_name in actual_skill_dirs:
         if skill_name not in all_declared:
             error(
-                f"{skills_label}/{skill_name}/ exists but is not listed in "
+                f"skill '{skill_name}' exists in {skills_label}/ but is not listed in "
                 "golden_skills or distractor_skills in metadata.json"
             )
 
@@ -766,34 +803,7 @@ def _check_python_import_order(script: Path, prefix: str) -> None:
             hit_non_import = True
 
 
-            else:
-                _check_python_import_order(script, prefix)
-
-
-def _check_python_import_order(script: Path, prefix: str) -> None:
-    """Check that all imports appear before non-import, non-docstring code."""
-    try:
-        tree = ast.parse(script.read_text())
-    except SyntaxError:
-        return  # already caught by py_compile
-    hit_non_import = False
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            if hit_non_import:
-                error(
-                    f"{prefix}/scripts/{script.name} has import on line {node.lineno} "
-                    "after non-import code — move all imports to the top of the file"
-                )
-                return
-        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-            pass  # module-level docstring
-        else:
-            hit_non_import = True
-
-
 # ---------------------------------------------------------------------------
-
-_SKILL_ROOT_ALLOWED = {"SKILL.md", "scripts", "references", "assets"}
 
 _SKILL_ROOT_ALLOWED = {"SKILL.md", "scripts", "references", "assets"}
 
@@ -895,7 +905,7 @@ def check_instruction_md(task_dir: Path, meta: dict | None = None, delivery: boo
             )
 
     # No golden or distractor skill names mentioned
-    if meta:
+    if delivery and meta:
         all_skills = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
         for skill_name in all_skills:
             if skill_name in text:
@@ -905,7 +915,7 @@ def check_instruction_md(task_dir: Path, meta: dict | None = None, delivery: boo
                 )
 
     # No SKILL.md body excerpts (8-word n-gram match)
-    if meta:
+    if delivery and meta:
         skills_dir = task_dir / "skills" if delivery else task_dir / "environment" / "skills"
         all_skill_names = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
         skill_ngrams: set[tuple[str, ...]] = set()
@@ -1013,7 +1023,7 @@ def check_instruction_md(task_dir: Path, meta: dict | None = None, delivery: boo
             )
 
     # No golden or distractor skill names mentioned
-    if meta:
+    if delivery and meta:
         all_skills = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
         for skill_name in all_skills:
             if skill_name in text:
@@ -1023,7 +1033,7 @@ def check_instruction_md(task_dir: Path, meta: dict | None = None, delivery: boo
                 )
 
     # No SKILL.md body excerpts (8-word n-gram match)
-    if meta:
+    if delivery and meta:
         skills_dir = task_dir / "skills" if delivery else task_dir / "environment" / "skills"
         all_skill_names = list(meta.get("golden_skills", [])) + list(meta.get("distractor_skills", []))
         skill_ngrams: set[tuple[str, ...]] = set()
@@ -1171,9 +1181,12 @@ def validate(task_path: Path, delivery: bool = False) -> bool:
     if meta and delivery:
         check_input_files_exist(task_path, meta)
 
+    if meta and not delivery:
+        check_expert_input_files(task_path, meta)
+
     check_skills(task_path, meta, delivery=delivery)
 
-    if meta:
+    if delivery and meta:
         check_skill_similarity(task_path, meta, delivery=delivery)
 
     check_instruction_md(task_path, meta=meta, delivery=delivery)

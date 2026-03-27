@@ -55,7 +55,7 @@ image = (
 # ---------------------------------------------------------------------------
 
 RESULTS_BUCKET = "skills-eval-ci"
-PER_RUN_TIMEOUT = 5400
+PER_RUN_TIMEOUT = 900
 
 GATE_SPECS: list[dict[str, Any]] = [
     {"name": "oracle", "agent": "oracle", "model": "oracle",

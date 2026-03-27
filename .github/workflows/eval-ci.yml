@@ -78,15 +78,13 @@ jobs:
               marker,
               `## ⏳ Eval CI — \`${taskName}\``,
               '',
-              'Running 6 eval gates on Modal. This takes ~15-30 min.',
+              'Running 4 eval gates on Modal. This takes ~15-30 min.',
               '',
               '| Gate | Required | Status |',
               '|------|----------|--------|',
               '| Oracle (solve.sh) | PASS | ⏳ Pending |',
-              '| Opus no-skills (5 runs) | 0/5 pass | ⏳ Pending |',
               '| Gemini no-skills (3 runs) | 0/3 pass | ⏳ Pending |',
-              '| Opus golden-skills (3 runs) | ≥1/3 pass | ⏳ Pending |',
-              '| Opus distractor-only (3 runs) | 0/3 pass | ⏳ Pending |',
+              '| Gemini distractor-only (3 runs) | 0/3 pass | ⏳ Pending |',
               '| Gemini all-skills+nudge (5 runs) | 1-4/5 pass | ⏳ Pending |',
               '',
               '---',
@@ -114,8 +112,8 @@ jobs:
 
       # ── Package + upload to S3 ──────────────────────────────────────
       - name: Package and upload to S3
-        if: steps.detect.outputs.has_changes == 'true'
         id: upload
+        if: steps.detect.outputs.has_changes == 'true'
         run: |
           TASK="${{ steps.detect.outputs.task }}"
           TIMESTAMP=$(date +%s)
@@ -130,8 +128,8 @@ jobs:
 
       # ── Read metadata for skill lists ───────────────────────────────
       - name: Read metadata
-        if: steps.detect.outputs.has_changes == 'true'
         id: meta
+        if: steps.detect.outputs.has_changes == 'true'
         run: |
           TASK="${{ steps.detect.outputs.task }}"
           META="tasks/${TASK}/metadata.json"
@@ -147,19 +145,31 @@ jobs:
 
       # ── Submit to Modal (returns instantly) ─────────────────────────
       - name: Submit eval to Modal
-        if: steps.detect.outputs.has_changes == 'true'
         id: submit
+        if: steps.detect.outputs.has_changes == 'true'
+        env:
+          TASK: ${{ steps.detect.outputs.task }}
+          S3_KEY: ${{ steps.upload.outputs.s3_key }}
+          GOLDEN: ${{ steps.meta.outputs.golden }}
+          DISTRACTOR: ${{ steps.meta.outputs.distractor }}
         run: |
-          TASK="${{ steps.detect.outputs.task }}"
+          python3 - <<'EOF'
+          import json, os, sys
+          payload = {
+              "s3_bucket": os.environ["S3_BUCKET"],
+              "s3_key": os.environ["S3_KEY"],
+              "task_name": os.environ["TASK"],
+              "golden_skill_dirs": json.loads(os.environ["GOLDEN"]),
+              "distractor_skill_dirs": json.loads(os.environ["DISTRACTOR"]),
+          }
+          with open("/tmp/eval-payload.json", "w") as f:
+              json.dump(payload, f)
+          EOF
+
           RESPONSE=$(curl -s -X POST "${MODAL_SUBMIT_URL}?api_key=${MODAL_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"s3_bucket\": \"${S3_BUCKET}\",
-              \"s3_key\": \"${{ steps.upload.outputs.s3_key }}\",
-              \"task_name\": \"${TASK}\",
-              \"golden_skill_dirs\": ${{ steps.meta.outputs.golden }},
-              \"distractor_skill_dirs\": ${{ steps.meta.outputs.distractor }}
-            }" --max-time 30)
+            -d @/tmp/eval-payload.json \
+            --max-time 30)
 
           echo "Modal response: ${RESPONSE}"
           JOB_ID=$(echo "${RESPONSE}" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
@@ -168,8 +178,8 @@ jobs:
 
       # ── Poll Modal for results ──────────────────────────────────────
       - name: Poll for results
-        if: steps.detect.outputs.has_changes == 'true'
         id: poll
+        if: steps.detect.outputs.has_changes == 'true'
         run: |
           JOB_ID="${{ steps.submit.outputs.job_id }}"
           MAX_POLLS=100   # 100 × 30s = 50 min max
@@ -206,7 +216,7 @@ jobs:
 
       # ── Post results comment ────────────────────────────────────────
       - name: Post results comment
-        if: always() && steps.detect.outputs.has_changes == 'true' && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && steps.detect.outputs.has_changes == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -227,12 +237,10 @@ jobs:
             const status = evalPassed ? 'PASSED' : 'FAILED';
 
             const gateOrder = [
-              { key: 'oracle',                  label: 'Oracle (solve.sh)',              req: 'PASS' },
-              { key: 'opus_no_skills',          label: 'Opus no-skills (5 runs)',        req: '0/5 pass' },
-              { key: 'gemini_no_skills',        label: 'Gemini no-skills (3 runs)',      req: '0/3 pass' },
-              { key: 'opus_golden_skills',      label: 'Opus golden-skills (3 runs)',    req: '≥1/3 pass' },
-              { key: 'opus_distractor_only',    label: 'Opus distractor-only (3 runs)',  req: '0/3 pass' },
-              { key: 'gemini_all_skills_nudge', label: 'Gemini all-skills+nudge (5 runs)', req: '1-4/5 pass' },
+              { key: 'oracle',                  label: 'Oracle (solve.sh)',                  req: 'PASS' },
+              { key: 'gemini_no_skills',        label: 'Gemini no-skills (3 runs)',          req: '0/3 pass' },
+              { key: 'gemini_distractor_only',  label: 'Gemini distractor-only (3 runs)',    req: '0/3 pass' },
+              { key: 'gemini_all_skills_nudge', label: 'Gemini all-skills+nudge (5 runs)',   req: '1-4/5 pass' },
             ];
 
             let rows = '';
